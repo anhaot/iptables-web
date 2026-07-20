@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iptables-web · 登录</title>
+  <style>
+    :root {
+      --brand: #4f46e5;
+      --brand-light: #6366f1;
+      --brand-dark: #3730a3;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+                   'Microsoft YaHei', 'Hiragino Sans GB', sans-serif;
+      min-height: 100vh; display: flex; overflow: hidden;
+      background: #f0f4ff; color: #1e293b;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ===== Container ===== */
+    .login-container {
+      display: flex; width: 100%; min-height: 100vh;
+      position: relative;
+    }
+
+    /* ===== Left: Brand + Decorative ===== */
+    .brand-side {
+      flex: 1; position: relative; overflow: hidden;
+      background: linear-gradient(160deg, #194bfb 0%, #3366ff 40%, #4f46e5 100%);
+      display: flex; align-items: center; justify-content: center;
+      padding: 3rem;
+    }
+
+    /* Oblique diagonal divider */
+    .brand-side::after {
+      content: ''; position: absolute; right: -80px; top: -5%;
+      width: 200px; height: 120%;
+      background: #f0f4ff;
+      transform: rotate(8deg);
+      box-shadow: -4px 0 40px rgba(0,0,0,0.08);
+    }
+
+    /* Decorative circles */
+    .decor-circle {
+      position: absolute; border-radius: 50%;
+      background: rgba(255,255,255,0.06);
+      pointer-events: none;
+    }
+    .decor-circle.c1 { width: 360px; height: 360px; top: -120px; right: 60px; }
+    .decor-circle.c2 { width: 200px; height: 200px; bottom: -40px; left: 10%;
+      background: rgba(255,255,255,0.04); }
+    .decor-circle.c3 { width: 80px; height: 80px; top: 30%; left: 20%;
+      background: rgba(255,255,255,0.08); }
+
+    /* Grid pattern */
+    .grid-pattern {
+      position: absolute; inset: 0; opacity: 0.04;
+      background-image:
+        linear-gradient(rgba(255,255,255,1) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,1) 1px, transparent 1px);
+      background-size: 50px 50px;
+      mask-image: radial-gradient(ellipse 70% 70% at 40% 50%, black 20%, transparent 70%);
+    }
+
+    /* Brand content */
+    .brand-content { position: relative; z-index: 2; text-align: center; max-width: 400px; }
+    .brand-logo {
+      width: 80px; height: 80px; margin: 0 auto 2rem;
+      background: rgba(255,255,255,0.15);
+      backdrop-filter: blur(8px);
+      border: 2px solid rgba(255,255,255,0.2);
+      border-radius: 20px; display: flex; align-items: center; justify-content: center;
+      font-size: 2.2rem; transition: transform 0.3s ease;
+    }
+    .brand-logo:hover { transform: scale(1.05) rotate(-3deg); }
+    .brand-content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -0.02em;
+      color: #ffffff; margin-bottom: 0.75rem; line-height: 1.2;
+    }
+    .brand-content .subtitle {
+      font-size: 0.95rem; color: rgba(255,255,255,0.7); line-height: 1.7;
+      font-weight: 400;
+    }
+    .brand-content .subtitle strong { color: #ffffff; font-weight: 600; }
+
+    .feature-tags {
+      display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: center;
+      margin-top: 2.5rem;
+    }
+    .feature-tag {
+      padding: 0.4rem 1rem; border-radius: 100px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: rgba(255,255,255,0.8); font-size: 0.78rem;
+      font-weight: 500; backdrop-filter: blur(4px);
+      transition: all 0.2s;
+    }
+    .feature-tag:hover {
+      background: rgba(255,255,255,0.18); color: #fff;
+    }
+
+    /* ===== Right: Login Form ===== */
+    .form-side {
+      flex: 0 0 520px; display: flex; align-items: center; justify-content: center;
+      background: #f0f4ff; padding: 3rem; position: relative; z-index: 1;
+    }
+    .form-card {
+      width: 100%; max-width: 400px;
+      background: #ffffff; border-radius: 20px;
+      padding: 2.75rem 2.5rem;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.06), 0 1px 4px rgba(0,0,0,0.04);
+    }
+
+    .form-header { margin-bottom: 2rem; text-align: center; }
+    .form-header h2 {
+      font-size: 1.5rem; font-weight: 700; color: #0f172a;
+      letter-spacing: -0.01em; margin-bottom: 0.35rem;
+    }
+    .form-header p { font-size: 0.85rem; color: #94a3b8; }
+
+    /* Input fields */
+    .field { margin-bottom: 1.25rem; }
+    .field label {
+      display: block; font-size: 0.8rem; font-weight: 600; color: #334155;
+      margin-bottom: 0.4rem; letter-spacing: 0.01em;
+    }
+    .input-wrap {
+      position: relative; display: flex; align-items: center;
+    }
+    .input-wrap .input-icon {
+      position: absolute; left: 14px; font-size: 1.1rem; color: #94a3b8;
+      pointer-events: none; transition: color 0.2s;
+      line-height: 1;
+    }
+    .input-wrap input {
+      width: 100%; padding: 0.75rem 1rem 0.75rem 2.6rem;
+      background: #f8fafc; border: 1.5px solid #e2e8f0;
+      border-radius: 12px; font-size: 0.9rem; font-family: inherit;
+      color: #0f172a; transition: all 0.2s ease; outline: none;
+    }
+    .input-wrap input:focus {
+      border-color: #6366f1; background: #fff;
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.1);
+    }
+    .input-wrap input:focus ~ .input-icon,
+    .input-wrap input:focus + .input-icon { color: #6366f1; }
+
+    /* Since .input-icon is before input, the focus selector won't work for prev sibling.
+       Use :focus-within on parent instead */
+    .input-wrap:focus-within .input-icon { color: #6366f1; }
+
+    .input-wrap input::placeholder { color: #cbd5e1; font-size: 0.85rem; }
+
+    .input-wrap.has-action input { padding-right: 3rem; }
+
+    .input-action {
+      position: absolute; right: 8px; width: 34px; height: 34px;
+      border: 0; border-radius: 9px; background: transparent;
+      color: #64748b; cursor: pointer; display: flex;
+      align-items: center; justify-content: center;
+      font-size: 1rem; line-height: 1; transition: all 0.2s;
+      font-family: inherit;
+    }
+    .input-action:hover {
+      background: #eef2ff; color: #4f46e5;
+    }
+    .input-action:focus-visible {
+      outline: 2px solid rgba(99,102,241,0.35);
+      outline-offset: 1px;
+    }
+
+    /* Captcha */
+    .captcha-box {
+      display: grid; grid-template-columns: minmax(0, 1fr) 154px;
+      gap: 0.75rem; align-items: stretch;
+    }
+    .captcha-box .input-wrap input { height: 46px; padding-left: 2.6rem; }
+    #captcha-input {
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+    }
+
+    .captcha-display {
+      width: 100%; height: 46px; padding: 0 0.75rem;
+      background: #eef2ff; border: 1.5px solid #c7d2fe;
+      border-radius: 12px; display: flex; align-items: center;
+      justify-content: space-between; gap: 0.5rem; cursor: pointer; user-select: none;
+      transition: all 0.2s; font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+      color: #3730a3; white-space: nowrap; letter-spacing: 0;
+    }
+    .captcha-display:hover {
+      border-color: #818cf8; background: #e0e7ff;
+      box-shadow: 0 2px 8px rgba(99,102,241,0.15);
+    }
+    .captcha-display:focus-visible {
+      outline: 2px solid rgba(99,102,241,0.35);
+      outline-offset: 2px;
+    }
+    .captcha-display .captcha-image {
+      min-width: 0; flex: 1; width: 100%; height: 40px;
+      display: block; object-fit: contain;
+    }
+    .captcha-display .refresh-dot {
+      flex: 0 0 auto; width: 24px; height: 24px;
+      border-radius: 7px; display: flex; align-items: center; justify-content: center;
+      font-size: 0.9rem; opacity: 0.72; transition: all 0.2s;
+    }
+    .captcha-display:hover .refresh-dot { opacity: 1; background: rgba(79,70,229,0.12); }
+
+    /* Error message */
+    .login-error {
+      background: #fef2f2; border: 1px solid #fecaca; color: #dc2626;
+      padding: 0.65rem 0.9rem; border-radius: 10px;
+      font-size: 0.8rem; margin-bottom: 1.15rem; display: none;
+      align-items: center; gap: 0.5rem;
+    }
+    .login-error.show { display: flex; }
+    .login-error .err-icon { flex-shrink: 0; font-size: 0.9rem; }
+
+    /* Submit button */
+    .btn-login {
+      width: 100%; padding: 0.8rem;
+      background: linear-gradient(135deg, #4f46e5, #6366f1);
+      color: #fff; border: none; border-radius: 12px;
+      font-size: 0.95rem; font-weight: 600; cursor: pointer;
+      transition: all 0.25s ease; font-family: inherit;
+      letter-spacing: 0.02em; position: relative; overflow: hidden;
+      box-shadow: 0 4px 16px rgba(79,70,229,0.3);
+      margin-top: 0.25rem;
+    }
+    .btn-login::after {
+      content: ''; position: absolute; inset: 0;
+      background: linear-gradient(135deg, rgba(255,255,255,0.1), transparent);
+      pointer-events: none;
+    }
+    .btn-login:hover:not(:disabled) {
+      box-shadow: 0 6px 24px rgba(79,70,229,0.45);
+      transform: translateY(-1px);
+    }
+    .btn-login:active:not(:disabled) { transform: scale(0.985); }
+    .btn-login:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    /* Loading spinner inside button */
+    .btn-spinner {
+      display: none; width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff; border-radius: 50%;
+      animation: spin 0.6s linear infinite; margin-right: 0.5rem;
+    }
+    .btn-login.loading .btn-spinner { display: inline-block; }
+    .btn-login.loading .btn-text { display: none; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ===== Responsive ===== */
+    @media (max-width: 900px) {
+      .brand-side { display: none; }
+      .form-side { flex: 1; padding: 1.5rem; }
+      .form-card { padding: 2rem 1.5rem; box-shadow: none; }
+      body { background: #fff; }
+      .captcha-box { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="login-container">
+
+  <!-- ===== Left: Brand Panel ===== -->
+  <div class="brand-side">
+    <div class="grid-pattern"></div>
+    <div class="decor-circle c1"></div>
+    <div class="decor-circle c2"></div>
+    <div class="decor-circle c3"></div>
+
+    <div class="brand-content">
+      <div class="brand-logo">🛡</div>
+      <h1>iptables-web</h1>
+      <p class="subtitle">
+        轻量级 <strong>防火墙可视化管理</strong> 面板<br>
+        支持 iptables 与 nftables 双后端引擎
+      </p>
+      <div class="feature-tags">
+        <span class="feature-tag">规则管理</span>
+        <span class="feature-tag">端口映射</span>
+        <span class="feature-tag">链浏览器</span>
+        <span class="feature-tag">自动持久化</span>
+        <span class="feature-tag">Docker 集成</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Right: Form Panel ===== -->
+  <div class="form-side">
+    <div class="form-card">
+      <div class="form-header">
+        <h2>欢迎回来</h2>
+        <p>请登录以继续使用管理面板</p>
+      </div>
+
+      <div id="login-error" class="login-error">
+        <span class="err-icon">!</span>
+        <span id="error-text"></span>
+      </div>
+
+      <form onsubmit="return handleLogin(event)" autocomplete="off">
+        <!-- Username -->
+        <div class="field">
+          <label for="username">用户名</label>
+          <div class="input-wrap">
+            <span class="input-icon">&#x1f464;</span>
+            <input type="text" id="username" placeholder="请输入用户名" autocomplete="username" required autofocus>
+          </div>
+        </div>
+
+        <!-- Password -->
+        <div class="field">
+          <label for="password">密码</label>
+          <div class="input-wrap has-action">
+            <span class="input-icon">&#x1f512;</span>
+            <input type="password" id="password" placeholder="请输入密码" autocomplete="current-password" required>
+            <button type="button" class="input-action" id="toggle-password" onclick="togglePassword()" aria-label="显示密码" title="显示密码">&#x1f441;</button>
+          </div>
+        </div>
+
+        <!-- Captcha -->
+        <div class="field">
+          <label>安全验证</label>
+          <div class="captcha-box">
+            <div class="input-wrap">
+              <span class="input-icon">&#x1f9e9;</span>
+              <input type="text" id="captcha-input" maxlength="5" placeholder="输入右侧字符" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+            </div>
+            <button type="button" class="captcha-display" id="captcha-question" onclick="refreshCaptcha()" title="点击刷新验证码">
+              <img class="captcha-image" id="captcha-image" alt="验证码" aria-label="验证码">
+              <span class="refresh-dot">&#x21bb;</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <button type="submit" class="btn-login" id="login-btn">
+          <span class="btn-spinner"></span>
+          <span class="btn-text">登 录</span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  var captchaId = '';
+
+  async function refreshCaptcha() {
+    var imageEl = document.getElementById('captcha-image');
+    imageEl.removeAttribute('src');
+    imageEl.alt = '验证码加载中';
+    try {
+      var resp = await fetch('/api/v1/auth/captcha');
+      var data = await resp.json();
+      if (data.success) {
+        captchaId = data.data.id;
+        imageEl.src = data.data.question;
+        imageEl.alt = '验证码图片';
+        document.getElementById('captcha-input').value = '';
+      } else {
+        imageEl.alt = '验证码获取失败';
+      }
+    } catch(e) {
+      imageEl.alt = '验证码网络错误';
+    }
+  }
+
+  function showError(msg) {
+    document.getElementById('error-text').textContent = msg;
+    document.getElementById('login-error').className = 'login-error show';
+  }
+
+  function hideError() {
+    document.getElementById('login-error').className = 'login-error';
+  }
+
+  function togglePassword() {
+    var input = document.getElementById('password');
+    var btn = document.getElementById('toggle-password');
+    var visible = input.type === 'text';
+    input.type = visible ? 'password' : 'text';
+    btn.setAttribute('aria-label', visible ? '显示密码' : '隐藏密码');
+    btn.setAttribute('title', visible ? '显示密码' : '隐藏密码');
+    btn.textContent = visible ? '\u{1f441}' : '\u{1f576}';
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    var btn = document.getElementById('login-btn');
+    btn.classList.add('loading');
+    btn.disabled = true;
+    hideError();
+
+    try {
+      var resp = await fetch('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('username').value.trim(),
+          password: document.getElementById('password').value,
+          captcha_id: captchaId,
+          captcha_ans: document.getElementById('captcha-input').value.trim()
+        })
+      });
+
+      var data = await resp.json();
+
+      if (!data.success) {
+        var msg = data.error ? data.error.message : '登录失败';
+        showError(msg);
+        await refreshCaptcha();
+        btn.classList.remove('loading');
+        btn.disabled = false;
+        return false;
+      }
+
+      sessionStorage.setItem('auth_token', data.data.token);
+      sessionStorage.setItem('auth_username', data.data.username);
+      sessionStorage.setItem('auth_role', data.data.role);
+      window.location.href = '/index.html';
+    } catch (err) {
+      showError('网络连接失败，请检查网络');
+      await refreshCaptcha();
+      btn.classList.remove('loading');
+      btn.disabled = false;
+    }
+    return false;
+  }
+
+  async function redirectIfAlreadyLoggedIn() {
+    var token = sessionStorage.getItem('auth_token');
+    if (!token) return false;
+    try {
+      var resp = await fetch('/api/v1/auth/session', {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      if (resp.ok) {
+        window.location.href = '/index.html';
+        return true;
+      }
+    } catch (e) {
+      // Keep showing login form on network/session errors.
+    }
+    sessionStorage.clear();
+    return false;
+  }
+
+  redirectIfAlreadyLoggedIn().then(function(redirecting) {
+    if (!redirecting) refreshCaptcha();
+  });
+</script>
+</body>
+</html>

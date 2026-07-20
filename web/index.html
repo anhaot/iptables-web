@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iptables-web — 防火墙可视化管理</title>
+  <link rel="stylesheet" href="/css/themes.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+	<button id="mobile-menu-toggle" class="mobile-menu-toggle" onclick="AppState.toggleSidebar()" aria-label="打开导航菜单">☰</button>
+  <div class="app-layout">
+    <!-- ===== 侧边栏 ===== -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="logo">🛡</div>
+        <div>
+          <h2>iptables-web</h2>
+          <span>防火墙可视化管理</span>
+        </div>
+      </div>
+      <nav class="sidebar-nav">
+        <a data-page="dashboard" onclick="AppState.navigate('dashboard')" class="active">
+          <span class="icon">📊</span> 仪表盘
+        </a>
+        <a data-page="rules" onclick="AppState.navigate('rules')">
+          <span class="icon">📋</span> 规则管理
+        </a>
+        <a data-page="chains" onclick="AppState.navigate('chains')">
+          <span class="icon">🔗</span> 链浏览器
+        </a>
+        <a data-page="docker" onclick="AppState.navigate('docker')">
+          <span class="icon">🐳</span> Docker 端口
+        </a>
+        <a data-page="assistant" onclick="AppState.navigate('assistant')">
+          <span class="icon">💡</span> 规则助手
+        </a>
+        <a data-page="system" onclick="AppState.navigate('system')">
+          <span class="icon">⚙</span> 系统管理
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <div id="sidebar-user" style="text-align:center;margin-bottom:0.75rem;font-size:0.8rem;color:var(--text-muted)">
+          <span id="user-info"></span>
+        </div>
+        <div class="theme-select-wrap">
+          <span id="theme-icon" class="theme-select-icon">☀️</span>
+          <select id="theme-select" class="theme-select" onchange="AppState.setTheme(this.value)" aria-label="切换主题">
+            <option value="light">默认白色</option>
+            <option value="dark">深色</option>
+            <option value="blue">蓝色</option>
+            <option value="green">绿色</option>
+            <option value="gray">灰色</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:0.5rem;justify-content:center">
+          <button class="theme-toggle-btn" onclick="AppState.logout()" title="退出登录" style="font-size:0.8rem">
+            🚪 退出
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ===== 主内容区 ===== -->
+    <main class="main-content">
+      <!-- 仪表盘 -->
+      <section class="page-section active" data-page="dashboard">
+        <div class="page-header">
+          <h1>📊 仪表盘</h1>
+          <button class="btn btn-secondary" onclick="AppState.refreshSystemInfo();DockerPorts.refresh()">↻ 刷新</button>
+        </div>
+        <div class="card-grid" id="dashboard-stats">
+          <div class="stat-card">
+            <div class="stat-icon">🔧</div>
+            <div class="stat-label">防火墙后端</div>
+            <div class="stat-value" style="font-size:1.25rem" id="dash-ipt-ver">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">💻</div>
+            <div class="stat-label">系统内核</div>
+            <div class="stat-value" style="font-size:1.25rem" id="dash-kernel">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">📋</div>
+            <div class="stat-label">规则总数</div>
+            <div class="stat-value" id="dash-total">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">✅</div>
+            <div class="stat-label">已启用规则</div>
+            <div class="stat-value" id="dash-enabled">—</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:1.5rem">
+          <div class="card-header">
+            <h3>📋 最近规则</h3>
+            <button class="btn btn-sm btn-primary" onclick="AppState.navigate('rules'); setTimeout(() => RulesList.openCreate(), 300)">+ 添加规则</button>
+          </div>
+          <div id="dashboard-rules"><div class="loading-spinner"><div class="spinner"></div> 加载中...</div></div>
+        </div>
+
+        <div class="card" style="margin-top:1rem">
+          <div class="card-header">
+            <h3>🐳 Docker 端口映射</h3>
+            <button class="btn btn-sm btn-secondary" onclick="DockerPorts.refresh()">扫描端口</button>
+          </div>
+          <div id="dashboard-docker"><div class="loading-spinner"><div class="spinner"></div> 扫描中...</div></div>
+        </div>
+      </section>
+
+      <!-- 规则管理 -->
+      <section class="page-section" data-page="rules">
+        <div class="page-header">
+          <h1>📋 防火墙规则</h1>
+        </div>
+        <div class="info-banner">
+          <span>
+            宿主机监听端口可使用 <strong>INPUT</strong> 链。
+            外部 Docker 转发流量使用 <strong>FORWARD</strong> 或 <strong>DOCKER_USER</strong> 链。
+            白名单场景需要先 <strong>ACCEPT</strong> 再兜底 <strong>DROP</strong>。
+            所有规则<strong>持久化存储</strong>，容器重启和宿主机重启后自动恢复。
+          </span>
+        </div>
+        <div id="rules-content"><div class="loading-spinner"><div class="spinner"></div> 加载规则中...</div></div>
+      </section>
+
+      <!-- 链浏览器 -->
+      <section class="page-section" data-page="chains">
+        <div class="page-header">
+		  <h1>🔗 实时防火墙规则</h1>
+        </div>
+        <div id="chains-content"><div class="loading-spinner"><div class="spinner"></div> 加载链信息中...</div></div>
+      </section>
+
+      <!-- Docker 端口 -->
+      <section class="page-section" data-page="docker">
+        <div class="page-header">
+          <h1>🐳 Docker 端口映射</h1>
+        </div>
+        <div id="docker-content"><div class="loading-spinner"><div class="spinner"></div> 扫描 Docker 端口...</div></div>
+      </section>
+
+      <!-- 规则助手 -->
+      <section class="page-section" data-page="assistant">
+        <div class="page-header">
+          <h1>💡 规则助手</h1>
+        </div>
+        <div id="assistant-content"><div class="loading-spinner"><div class="spinner"></div> 加载中...</div></div>
+      </section>
+
+      <!-- 系统管理 -->
+      <section class="page-section" data-page="system">
+        <div class="page-header">
+          <h1>⚙ 系统与持久化</h1>
+        </div>
+        <div id="system-content"><div class="loading-spinner"><div class="spinner"></div> 加载系统信息...</div></div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- 规则编辑弹窗 -->
+  <div id="rule-modal" class="hidden">
+    <div class="modal-overlay" onclick="RuleForm.close()"></div>
+    <div class="modal" id="rule-modal-content"></div>
+  </div>
+
+  <!-- Toast 通知容器 -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- 脚本 -->
+  <script src="/js/api.js"></script>
+  <script src="/js/components/notifications.js"></script>
+  <script src="/js/app.js"></script>
+  <script src="/js/components/firewall-help.js"></script>
+  <script src="/js/components/rules-list.js"></script>
+  <script src="/js/components/rule-form.js"></script>
+  <script src="/js/components/chains-view.js"></script>
+  <script src="/js/components/docker-ports.js"></script>
+  <script src="/js/components/rule-assistant.js"></script>
+  <script src="/js/components/system-view.js"></script>
+
+  <!-- 仪表盘初始化 -->
+  <script>
+    async function updateDashboard() {
+      try {
+        const info = await api.getSystemInfo();
+        document.getElementById('dash-ipt-ver').textContent = (info.firewall_backend || '') + ' ' + (info.firewall_version || '—');
+        document.getElementById('dash-kernel').textContent = info.kernel_version || '—';
+        document.getElementById('dash-total').textContent = info.total_rules || 0;
+        document.getElementById('dash-enabled').textContent = info.enabled_rules || 0;
+      } catch(e) {}
+
+      try {
+		const rules = await api.listRules('', 'packet');
+        const recent = rules.slice(0, 5);
+        const tbody = document.getElementById('dashboard-rules');
+        if (tbody) {
+          tbody.innerHTML = recent.length === 0
+            ? '<div class="empty-state"><div class="empty-icon">🔒</div><h3>暂无规则</h3><p><a href="#" onclick="AppState.navigate(\'rules\');setTimeout(() => RulesList.openCreate(),300)">创建第一条规则</a>，开始管理防火墙。</p></div>'
+            : `<div class="table-container"><table>
+                <thead><tr><th>描述</th><th>链</th><th>动作</th><th>状态</th></tr></thead>
+                <tbody>${recent.map(r => `
+                  <tr>
+                    <td><span style="font-weight:500">${escapeHtml(r.desc || '—')}</span></td>
+					<td><span class="badge badge-return">${escapeHtml(r.chain)}</span></td>
+                    <td>${actionBadge(r.action)}</td>
+                    <td><span style="color:${r.enabled ? 'var(--success)' : 'var(--text-muted)'}">${r.enabled ? '● 已启用' : '○ 已禁用'}</span></td>
+                  </tr>
+                `).join('')}</tbody>
+              </table></div>`;
+        }
+      } catch(e) {}
+
+      try {
+        const mappings = await api.getDockerMappings();
+        const ipv4Mappings = mappings.filter(m => dockerMappingFamily(m) === 'ipv4');
+        const el = document.getElementById('dashboard-docker');
+        if (el) {
+          el.innerHTML = ipv4Mappings.length === 0
+            ? '<div class="empty-state" style="padding:2rem"><div class="empty-icon">🐳</div><h3>未检测到 IPv4 Docker 端口映射</h3><p>首页默认只展示 IPv4；IPv6 映射请到 Docker 端口页查看。</p></div>'
+            : `<div class="mapping-list" style="padding:0">${ipv4Mappings.slice(0,5).map(m => `
+                <div class="mapping-item" style="background:var(--bg-primary)">
+                  <div class="mapping-info">
+                    <span class="mapping-name">${escapeHtml(m.container_name)}</span>
+                    <span class="mapping-port">${escapeHtml(formatHostEndpoint(m.host_ip, m.host_port))} → :${m.container_port}/${escapeHtml(m.protocol)}</span>
+                    <span class="mapping-tag">DOCKER 链</span>
+                  </div>
+                </div>
+              `).join('')}</div>
+              ${ipv4Mappings.length > 5 ? `<div style="padding:0.6rem 1rem;font-size:0.8rem;color:var(--text-muted)">+ ${ipv4Mappings.length - 5} 更多 IPv4 映射</div>` : ''}`;
+        }
+      } catch(e) {}
+    }
+
+    const origNavigate = AppState.navigate.bind(AppState);
+    AppState.navigate = function(page) {
+      origNavigate(page);
+      if (page === 'dashboard') updateDashboard();
+    };
+  </script>
+</body>
+</html>

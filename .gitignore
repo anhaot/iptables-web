@@ -1,0 +1,18 @@
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+.DS_Store
+*.swp
+*.tmp
+.env
+.env.local
+/data/
+.playwright-cli/
+output/
+
+# Keep only the current signed-off release archive in source control.
+dist/*
+!dist/iptables-web-20260720.13-linux-amd64.tar.gz
+!dist/iptables-web-20260720.13-linux-amd64.tar.gz.sha256

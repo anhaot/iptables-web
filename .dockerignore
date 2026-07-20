@@ -1,0 +1,11 @@
+.git
+.gitignore
+*.md
+docs/
+bin/
+.DS_Store
+*.swp
+*.tmp
+.env
+.env.local
+docker-compose.override.yml

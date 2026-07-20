@@ -1,0 +1,45 @@
+services:
+  iptables-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: iptables-web
+    # CRITICAL: Host networking is required so iptables commands inside the
+    # container modify the HOST's network stack, not the container's isolated
+    # network namespace. Without this, the tool would only manage rules in
+    # the container's own (minimal) iptables.
+    network_mode: "host"
+    volumes:
+      # Persistent rule storage — survives container restarts AND host reboots
+      - iptables-web-data:/data
+      # Optional: mount Docker socket to auto-detect container port mappings
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+    cap_add:
+      - NET_ADMIN      # Required for modifying iptables rules
+      - NET_RAW        # Required for iptables rule checking
+    cap_drop:
+      - ALL            # Drop all other capabilities (defense in depth)
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Listen on all IPv4 interfaces. Keep authentication enabled and use
+      # firewalld/security groups to restrict who can reach this port.
+      - LISTEN_ADDR=0.0.0.0:33801
+      - RULES_FILE=/data/rules.json
+      - USERS_FILE=/data/users.json
+      - LOG_LEVEL=info
+      - TZ=Asia/Shanghai
+      - AUTH_ENABLED=true
+      # Optional API key for script access. Web login uses the user system.
+      # - API_KEY=your-secure-api-key-here
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:33801/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 8s
+
+volumes:
+  iptables-web-data:
+    driver: local
