@@ -1,5 +1,7 @@
 # 运维与排障
 
+iptables-web 运行在高权限环境。新增宽范围拒绝、恢复完整规则集、修改默认策略或清空规则前，应先备份并准备物理或带外控制台。部署参数和网络暴露要求见[部署与配置](deployment.md)。
+
 ## 日常只读检查
 
 ```bash
@@ -74,7 +76,7 @@ ctorigdstport 18080 ctdir ORIGINAL
 
 创建或编辑规则时，第一次点击只会显示字段级变更预览；确认后才写入运行防火墙。
 
-## 管理员审计与最近变更回滚
+## 审计、回滚、备份与恢复
 
 系统管理页显示最近管理员变更，并可导出完整 JSON 审计。默认文件：
 
@@ -90,7 +92,7 @@ ctorigdstport 18080 ctdir ORIGINAL
 
 限时回滚只覆盖本程序托管规则，不替代完整 packet 备份，也不能恢复 Docker、firewalld 或其他工具的外部规则。
 
-## 备份
+### 完整备份
 
 系统页“下载全部备份”会生成组合 JSON，其中包含 `packet.rules` 和 `managed-rules.json`。恢复时在系统页选择该 JSON 文件，不需要打开或复制文件内容。命令行也可备份：
 
@@ -102,7 +104,15 @@ sudo cp -a /var/lib/iptables-web /root/iptables-web-data-backup
 
 选择与你实际后端匹配的命令。
 
-## 只清理本程序托管规则
+### 恢复完整规则集
+
+Web 恢复接口会先检查清单和规则语法，备份当前状态，再替换完整 packet 规则集。组合 JSON 会同时恢复托管元数据和可用的 IPv6 导出。任一步骤失败时程序会尝试回滚。
+
+恢复会替换系统规则，执行前仍必须审核备份内容并保留带外控制台。数据文件含义和恢复机制见[架构与实现](architecture.md#审计备份与恢复)。
+
+## 清理与卸载
+
+### 只清理本程序托管规则
 
 ```bash
 sudo systemctl stop iptables-web
@@ -113,6 +123,16 @@ sudo RULES_FILE=/var/lib/iptables-web/rules.json \
 ```
 
 这是首选清理方式：只删除托管规则并清空托管记录，不 flush 外部链。
+
+### 卸载
+
+默认卸载会先精确删除界面托管规则。也可以先在系统管理页点击“清空界面配置的规则”，确认运行态和托管记录均已清空，再卸载：
+
+```bash
+sudo /opt/iptables-web/uninstall.sh
+```
+
+`--purge` 是兼容保留的完整清理别名，不会修改或 reload firewalld。若托管规则清理失败，脚本默认停止并保留文件和数据，避免失去恢复依据；只有明确接受残留时才使用 `--force`。
 
 ## 手动清空全部 packet 规则（高风险）
 
@@ -159,17 +179,3 @@ sudo ip6tables-restore < /root/ip6tables-before-flush.rules
 ```
 
 firewalld/Docker 重启也可能重新生成规则，但不能把它当成可靠回滚方案。
-
-## 恢复完整规则集
-
-Web 恢复接口会先做语法校验和当前状态备份，再替换完整 packet 规则集；组合 JSON 会同时恢复托管元数据和可用的 IPv6 规则。任一步骤失败时程序会尝试回滚。执行前仍必须审核内容并准备带外回滚。
-
-## 卸载
-
-默认卸载会先精确删除界面托管规则。也可以先在系统管理页点击“清空界面配置的规则”，确认运行态和托管记录均已清空，再卸载：
-
-```bash
-sudo /opt/iptables-web/uninstall.sh
-```
-
-`--purge` 是兼容保留的完整清理别名，不会修改或 reload firewalld。若托管规则清理失败，脚本默认停止并保留文件/数据，避免失去恢复依据；只有明确接受残留时才用 `--force`。

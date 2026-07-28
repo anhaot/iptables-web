@@ -1,52 +1,121 @@
-# 架构
+# 架构与实现
+
+本文解释 iptables-web 如何把页面操作转换为可核验、可恢复的防火墙变更。安装参数见[部署与配置](deployment.md)，日常操作和故障处理见[运维手册](operations.md)。
+
+## 组件
+
+项目由单个 Go 服务和原生 HTML、CSS、JavaScript 前端组成。构建时，`web/` 会同步到 `assets/web/`，再通过 Go `embed` 编入二进制。
 
 ```text
 Browser
-  └─ Web UI / API
-       ├─ 用户与会话存储 users.json
-       ├─ 托管规则存储 rules.json
-       ├─ 变更审计 audit.jsonl
-       ├─ 限时回滚快照 rollback.json
+  └─ Web UI / HTTP API
+       ├─ 认证与角色校验
+       ├─ 规则模型与顺序校验
+       ├─ JSON 数据存储
+       ├─ 变更审计与回滚
        ├─ packet executor
-       │    └─ iptables（含 iptables-nft 兼容层）
+       │    └─ iptables / iptables-nft
        ├─ Docker 映射发现
        │    ├─ Docker socket
-       │    └─ docker CLI（socket 不可用时回退）
-       └─ 规则助手（只生成/解读文本）
+       │    └─ docker CLI
+       └─ 规则助手（只生成或解读文本）
 ```
 
-## 规则模型
+部署时不需要 Node.js、数据库或独立 Web 服务器。进程需要足够权限操作宿主机 packet 防火墙。
 
-托管规则包含 backend、chain、action、协议、来源/目标、端口、Docker 原始目标端口、接口、连接状态、位置和启用状态。backend 目前只能是 `packet`。
+## 一次规则变更如何执行
 
-运行态规则可能被外部工具修改，因此新增、编辑、启停、删除和排序都以同一链的托管记录为声明状态重新同步。删除不存在的 iptables 规则被视为成功，保证启停操作幂等。
+以“允许 `10.10.0.0/16` 访问 Docker 发布端口 `10089`”为例：
 
-程序不会 flush 整条系统链；同步时只尝试删除与托管记录完全匹配的规则，再按有效位置重新加入启用规则。
+1. 页面收集链、来源、端口和动作，并先显示字段级预览。
+2. 管理员确认后，浏览器向 Go API 提交结构化 JSON。
+3. 认证中间件验证会话、首次改密状态和角色权限。
+4. 服务端校验地址、端口、链、动作、规则范围和白名单顺序。
+5. 写操作取得进程内互斥锁，并保存变更前托管规则快照。
+6. 服务端更新声明状态，将规则转换为独立的命令参数。
+7. 执行层等待 xtables 锁，在超时限制内同步对应链。
+8. 服务端重新读取运行态规则进行核验。
+9. 成功后写入审计并开启回滚窗口；失败时恢复变更前状态。
 
-## 变更预览、审计与回滚
+外部命令不使用请求内容拼接 shell 字符串。规则字段在模型层标准化后作为独立参数传给执行器。
 
-规则创建和编辑先在浏览器中显示字段级前后差异，管理员确认后才调用写接口。所有管理员变更由服务端中间件串行捕获，记录操作者、来源、请求结果和脱敏后的规则/用户差异。
+## 声明状态与运行状态
 
-成功改变托管规则时，变更前快照以 0600 权限保存并保留 10 分钟。回滚会精确删除当前托管规则、恢复快照、重新同步并核验；失败时尝试恢复回滚前状态。审计和回滚文件默认与 `rules.json` 位于同一数据目录。
+程序同时处理两种状态：
 
-## 首次登录改密
+- `rules.json` 是声明状态，表示页面希望系统维持的托管规则；
+- Linux 内核中的 iptables 是运行状态，实际决定数据包是否放行。
 
-用户记录包含持久化的 `must_change_password` 状态，登录会话会同步该状态。默认管理员、管理员新建用户和被重置密码的用户均会进入强制改密流程。
+新增、编辑、启停、删除和排序都会以同一链的声明状态重新同步运行状态。服务启动时也会恢复已启用规则，因此宿主机或容器重启后不需要人工重建。
 
-认证中间件在服务端限制未改密会话，只允许会话检查、修改本人密码和退出。改密成功后状态清除并撤销该用户全部旧会话，避免仅依赖前端跳转而被直接调用 API 绕过。
+删除不存在的运行态规则视为成功，使启停和清理保持幂等。程序不会 flush 系统链；同步时只精确删除可由托管记录重建的规则，再按有效位置加入当前启用规则。
 
-## Docker 路径
+托管模型当前只有 `packet` 后端，支持 `INPUT`、`FORWARD`、`OUTPUT`、`DOCKER` 和 `DOCKER_USER`，以及 `ACCEPT`、`DROP`、`REJECT`、`LOG`、`RETURN` 动作。IPv6 托管规则会被拒绝，Docker IPv6 映射目前只读。
 
-外部请求命中 Docker 发布端口后通常经过 DNAT 和 FORWARD/DOCKER-USER，而不是宿主机 INPUT。`original_dport` 使用 conntrack 的原始目标端口，避免把多个映射到相同容器端口的服务混在一起。
+## 数据文件
 
-托管模型不允许同时设置 `dport` 与 `original_dport`。前者在 DOCKER-USER 中表示 DNAT 后容器端口，后者表示 DNAT 前宿主机发布端口；把宿主机端口同时写入两者会使端口不同的映射永远无法命中。启动迁移只删除完全匹配的旧托管规则，再以 `original_dport` 重新同步。
+默认情况下，数据文件与 `RULES_FILE` 位于同一目录：
 
-iptables 表达式在 `--ctorigdstport` 后增加 `--ctdir ORIGINAL`；nft 表达式使用 `ct direction original`。如果方向不受限，原始连接元组也可能让兜底 DROP 命中容器返回包，表现为 ACCEPT 和 DROP 计数同时增长、客户端最终超时。
+| 文件 | 内容 | 写入方式 |
+| --- | --- | --- |
+| `rules.json` | 托管规则及顺序 | 临时文件写入后原子替换 |
+| `users.json` | 用户、密码哈希、角色、强制改密状态 | 临时文件写入后原子替换 |
+| `audit.jsonl` | 追加式管理员变更记录 | 逐条追加 |
+| `rollback.json` | 最近一次规则变更前快照 | 临时文件写入后原子替换 |
 
-Docker 映射只来自 Docker socket 或 Docker CLI。普通 `/proc` 监听端口无法证明来自 Docker，因此不作为映射来源。应用会只读检查 iptables 的 DOCKER-USER 链和 FORWARD 跳转；缺少任一项时不允许通过 Docker 页面创建规则。原生 nftables 后端没有 Docker iptables 的 DOCKER-USER 入口，并且已从运行后端中禁用。
+安装器创建的数据目录权限为 `0700`，数据文件权限为 `0600`。登录会话、验证码和登录失败计数只保存在进程内存中，服务重启后失效。
 
-Docker 映射带 `family=ipv4|ipv6`。UI 分开显示，仪表盘只显示 IPv4。IPv6 端口页暂时只读；规则助手可生成 ip6tables/nftables 命令。
+持久化失败时，服务端会恢复内存中的旧值；内核同步失败时，会恢复声明状态并尝试重新同步旧规则。这个机制只覆盖本程序托管内容，无法恢复外部规则、路由或网络命名空间。
 
-## firewalld 边界
+## Docker 流量路径
 
-firewalld 是外部管理面。程序没有 Zone API、Zone 页面、rich rule 模型或 firewall-cmd 执行器；安装和卸载脚本也不会执行 `firewall-cmd`。规则助手仅生成和解读命令文本，不会执行它们。
+宿主机服务和 Docker 发布端口经过不同路径：
+
+```text
+宿主机服务
+客户端 ──► 宿主机端口 ──► INPUT ──► 宿主机进程
+
+Docker 发布端口
+客户端 ──► 宿主机:10089 ──► DNAT ──► 容器:8080
+                              │
+                              └──► FORWARD ──► DOCKER-USER
+```
+
+外部请求到达 `DOCKER-USER` 时，普通 `dport` 可能已经变为容器端口。`original_dport` 使用 conntrack 的原始连接元组匹配 DNAT 前宿主机端口；`original_dest` 可进一步区分宿主机地址。
+
+托管模型不允许同时设置 `dport` 与 `original_dport`。iptables 表达式在 `--ctorigdstport` 后增加 `--ctdir ORIGINAL`，只匹配客户端到容器的原始方向，避免兜底 DROP 拦截返回包。
+
+Docker 映射只来自只读 Docker socket 或 Docker CLI。普通监听端口不能证明由 Docker 发布，因此不会被当作映射。创建 Docker 策略前，服务端还会检查 `DOCKER-USER` 链以及 `FORWARD → DOCKER-USER` 跳转是否真实可用。
+
+## 身份认证
+
+登录成功后，服务端创建内存会话，浏览器在当前标签页的 `sessionStorage` 中保存 Token，并通过 Bearer Token 调用 API。
+
+默认管理员、管理员新建用户和被重置密码的用户带有 `must_change_password` 状态。认证中间件在服务端只允许这些会话访问会话检查、修改本人密码和退出接口，不能通过绕过前端页面调用其他 API。改密成功后状态清除，该用户全部旧会话同时撤销。
+
+角色在每次会话校验时从当前用户记录刷新。用户删除、密码重置或本人改密会撤销相关会话。
+
+## 审计、备份与恢复
+
+规则、Docker 白名单、用户、密码、完整恢复和清理操作由审计中间件捕获。记录包含请求 ID、操作者、来源地址、动作、HTTP 结果和脱敏后的前后差异，不记录密码、Token 或 API Key。
+
+每次成功改变托管规则后，变更前快照保留 10 分钟。回滚会精确删除当前托管规则、恢复快照、重新同步并核验；回滚前状态随后成为新的反向回滚点。
+
+系统页的完整备份是带版本清单的组合 JSON，包含：
+
+- IPv4 `iptables-save` 结果；
+- 可用时的 IPv6 规则集；
+- `managed-rules.json` 托管记录；
+- 描述文件名和格式版本的 manifest。
+
+完整恢复会先检查清单和规则语法，再备份当前状态并以替换语义应用；失败时尝试恢复旧规则。命令和应急步骤见[运维手册](operations.md)。
+
+## 管理边界
+
+- Web 管理只写入 iptables 或 iptables-nft 兼容后端；
+- 原生 nftables 写入后端已禁用；
+- firewalld Zone 和 rich rule 由程序外部管理；
+- 规则助手可生成 ip6tables、nftables 和 firewalld 文本，但不会执行；
+- 卸载和清理只处理托管规则，不 reload firewalld，不 flush 未知链。
+
+这些边界用于避免多个防火墙管理面相互覆盖。对外暴露、容器权限和高风险操作要求见[部署与配置](deployment.md)和[运维手册](operations.md)。

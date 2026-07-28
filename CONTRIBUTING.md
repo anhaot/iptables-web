@@ -4,7 +4,7 @@
 
 ## 开始之前
 
-1. 先阅读 [文档中心](docs/index.md)、[架构说明](docs/architecture.md) 和 [开发指南](docs/development.md)。
+1. 先阅读[文档中心](docs/index.md)和[架构与实现](docs/architecture.md)。
 2. 确认问题在当前代码上可复现，并记录操作系统、防火墙后端、部署方式和最小复现步骤。
 3. 安全问题不要在公开问题中包含真实 IP、规则集、密码、Token、API Key 或 `users.json`。
 
@@ -42,6 +42,27 @@ node scripts/ui-logic-test.js
 
 只改文档时也应检查相对链接、命令路径、环境变量名和 API 方法是否与实现一致。
 
+## 前端资源
+
+可直接调试的前端源码位于 `web/`，Go 二进制嵌入 `assets/web/`。构建脚本会先同步这两个目录。手工修改后应检查：
+
+```bash
+diff -qr web assets/web
+```
+
+不要只更新其中一份，否则源码页面和发布二进制会出现差异。
+
+## 构建发布包
+
+```bash
+VERSION=0.1.0 bash scripts/build-package.sh
+bash scripts/verify-package.sh dist/iptables-web-0.1.0-linux-amd64.tar.gz
+```
+
+构建脚本会同步前端、运行测试、生成 Linux amd64 二进制、安装脚本、文档、版本清单和 SHA-256。离线验证不会启动服务或访问防火墙。
+
+正式版本使用 `v主版本.次版本.修订版本` Tag。推送版本 Tag 后，GitHub Actions 自动构建并创建 Release。`dist/` 只用于本地构建，不提交到 Git。
+
 ## 提交说明
 
 一次变更尽量只解决一个问题。说明中应包含：
@@ -55,11 +76,10 @@ node scripts/ui-logic-test.js
 ## 文档维护
 
 - 面向首次使用者的入口放在 `README.md`。
-- 部署步骤放在 `docs/deployment.md`。
-- 全量环境变量放在 `docs/configuration.md`。
+- 安装、环境变量和网络安全配置放在 `docs/deployment.md`。
 - API 契约放在 `docs/api.md`。
-- 日常操作和事故处置放在 `docs/operations.md`。
-- 内部组件和设计边界放在 `docs/architecture.md`。
+- 日常操作、备份恢复和事故处置放在 `docs/operations.md`。
+- 内部组件、数据文件和设计边界放在 `docs/architecture.md`。
 - 尚未实现的功能只放在 `docs/roadmap.md`，不要写成现有能力。
 
 ## 仓库边界
@@ -68,5 +88,3 @@ node scripts/ui-logic-test.js
 - 不提交 `bin/`、`dist/`、浏览器测试输出、覆盖率文件、本地审查报告或运行数据。
 - 发布压缩包和校验和上传到 GitHub Releases，不放入源码分支。
 - `.env`、Token、API Key、`users.json`、`audit.jsonl` 和真实防火墙备份不得提交。
-
-更详细的字段、路由和发布检查项见 [开发指南](docs/development.md)。
