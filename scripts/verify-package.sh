@@ -65,6 +65,7 @@ LC_ALL=C grep -a -q '在执行顺序中查看' "${binary}" || { echo "Binary lac
 LC_ALL=C grep -a -q '预览变更' "${binary}" || { echo "Binary lacks rule change preview" >&2; exit 1; }
 LC_ALL=C grep -a -q '导出完整审计' "${binary}" || { echo "Binary lacks audit export UI" >&2; exit 1; }
 LC_ALL=C grep -a -q '回滚最近变更' "${binary}" || { echo "Binary lacks rollback window UI" >&2; exit 1; }
+LC_ALL=C grep -a -q '首次登录，请修改密码' "${binary}" || { echo "Binary lacks mandatory first-login password change" >&2; exit 1; }
 LC_ALL=C grep -a -q 'iptables-nft 兼容后端' "${binary}" || { echo "Binary has stale login backend description" >&2; exit 1; }
 LC_ALL=C grep -a -q 'favicon.svg' "${binary}" || { echo "Binary lacks embedded favicon" >&2; exit 1; }
 LC_ALL=C grep -a -q 'Docker 原始宿主机端口已填写时' "${binary}" || { echo "Binary lacks post-DNAT dport protection" >&2; exit 1; }

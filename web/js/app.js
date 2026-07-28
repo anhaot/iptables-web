@@ -21,10 +21,15 @@ const AppState = {
     this.username = sessionStorage.getItem('auth_username') || '';
     this.role = sessionStorage.getItem('auth_role') || '';
 
-    // Check auth by trying to access a protected endpoint
+    // Check the session first so bootstrap accounts cannot bypass the
+    // mandatory password-change page by opening index.html directly.
     var needLogin = false;
     try {
-      await api.listRules();
+      var session = await api.sessionCheck();
+      if (session && session.requires_password_change) {
+        window.location.href = '/change-password.html';
+        return;
+      }
     } catch (e) {
       if (e.status === 401) {
         needLogin = true;

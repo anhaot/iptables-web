@@ -26,10 +26,11 @@ type UserStore struct {
 }
 
 type Session struct {
-	UserID    string
-	Username  string
-	Role      string
-	ExpiresAt time.Time
+	UserID             string
+	Username           string
+	Role               string
+	MustChangePassword bool
+	ExpiresAt          time.Time
 }
 
 type CaptchaEntry struct {
@@ -95,9 +96,17 @@ func (s *UserStore) Load() error {
 					return fmt.Errorf("重置默认管理员密码失败: %w", err)
 				}
 				u.Password = string(hash)
+				u.MustChangePassword = true
 				u.UpdatedAt = time.Now()
 				changed = true
 			}
+		}
+		// Migrate installations that still use the published bootstrap
+		// password but predate the explicit first-login flag.
+		if strings.EqualFold(u.Username, "admin") && !u.MustChangePassword &&
+			auth.VerifyPassword("admin123", u.Password) {
+			u.MustChangePassword = true
+			changed = true
 		}
 	}
 	if !hasAdmin {
@@ -118,12 +127,13 @@ func (s *UserStore) createDefaultAdminLocked() error {
 		return fmt.Errorf("创建默认管理员失败: %w", err)
 	}
 	admin := &model.User{
-		ID:        newUserID(),
-		Username:  "admin",
-		Password:  string(hash),
-		Role:      "admin",
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:                 newUserID(),
+		Username:           "admin",
+		Password:           string(hash),
+		Role:               "admin",
+		MustChangePassword: true,
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
 	}
 	s.users = append(s.users, admin)
 	return nil
@@ -167,6 +177,7 @@ func (s *UserStore) Create(user *model.User) error {
 		return fmt.Errorf("密码加密失败: %w", err)
 	}
 	user.Password = string(hash)
+	user.MustChangePassword = true
 	stored := cloneUser(user)
 	s.users = append(s.users, stored)
 	if err := s.writeFileLocked(); err != nil {
@@ -197,8 +208,10 @@ func (s *UserStore) Update(user *model.User) error {
 					return fmt.Errorf("密码加密失败: %w", err)
 				}
 				updated.Password = string(hash)
+				updated.MustChangePassword = true
 			} else {
 				updated.Password = u.Password
+				updated.MustChangePassword = u.MustChangePassword
 			}
 			s.users[i] = updated
 			if err := s.writeFileLocked(); err != nil {
@@ -259,17 +272,23 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 			if len(newPassword) < 6 {
 				return fmt.Errorf("新密码长度至少 6 个字符")
 			}
+			if auth.VerifyPassword(newPassword, u.Password) {
+				return fmt.Errorf("新密码不能与原密码相同")
+			}
 			hash, err := auth.HashPassword(newPassword)
 			if err != nil {
 				return fmt.Errorf("密码加密失败: %w", err)
 			}
 			oldPassword := u.Password
 			oldUpdatedAt := u.UpdatedAt
+			oldMustChangePassword := u.MustChangePassword
 			u.Password = string(hash)
+			u.MustChangePassword = false
 			u.UpdatedAt = time.Now()
 			if err := s.writeFileLocked(); err != nil {
 				u.Password = oldPassword
 				u.UpdatedAt = oldUpdatedAt
+				u.MustChangePassword = oldMustChangePassword
 				return err
 			}
 			s.deleteSessionsForUserLocked(id)
@@ -307,15 +326,17 @@ func (s *UserStore) Login(username, password string) (*model.LoginResponse, erro
 			}
 			token := generateToken()
 			s.sessions[token] = &Session{
-				UserID:    u.ID,
-				Username:  u.Username,
-				Role:      u.Role,
-				ExpiresAt: time.Now().Add(24 * time.Hour),
+				UserID:             u.ID,
+				Username:           u.Username,
+				Role:               u.Role,
+				MustChangePassword: u.MustChangePassword,
+				ExpiresAt:          time.Now().Add(24 * time.Hour),
 			}
 			return &model.LoginResponse{
-				Token:    token,
-				Username: u.Username,
-				Role:     u.Role,
+				Token:                  token,
+				Username:               u.Username,
+				Role:                   u.Role,
+				RequiresPasswordChange: u.MustChangePassword,
 			}, nil
 		}
 	}
@@ -344,6 +365,7 @@ func (s *UserStore) ValidateSession(token string) (*Session, error) {
 		if user.ID == sess.UserID {
 			sess.Username = user.Username
 			sess.Role = user.Role
+			sess.MustChangePassword = user.MustChangePassword
 			copy := *sess
 			return &copy, nil
 		}

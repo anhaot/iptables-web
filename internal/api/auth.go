@@ -111,9 +111,10 @@ func (h *AuthHandler) SessionCheck(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusUnauthorized, "invalid_token", err.Error())
 		return
 	}
-	respondOK(w, map[string]string{
-		"username": sess.Username,
-		"role":     sess.Role,
+	respondOK(w, map[string]interface{}{
+		"username":                 sess.Username,
+		"role":                     sess.Role,
+		"requires_password_change": sess.MustChangePassword,
 	})
 }
 

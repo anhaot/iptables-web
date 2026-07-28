@@ -6,7 +6,7 @@ iptables-web 需要操作 packet 防火墙，属于高权限管理服务。
 
 默认监听 `0.0.0.0:33801`，因此进程接受所有本机 IPv4 网卡的连接。安装器不会放行端口；管理员应使用外部 firewalld、云安全组、VPN 或反向代理限制来源。服务没有内置 TLS，跨不可信网络应使用 HTTPS 反向代理。
 
-保持 `AUTH_ENABLED=true`。首次账号是 `admin` / `admin123`，登录后必须立即修改。API Key 不应写入公开脚本、日志或仓库。
+保持 `AUTH_ENABLED=true`。首次账号是 `admin` / `admin123`；首次登录会强制进入改密页面，完成前其他管理 API 返回 `password_change_required`。API Key 不应写入公开脚本、日志或仓库。
 
 ## 防火墙边界
 

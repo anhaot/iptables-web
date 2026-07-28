@@ -24,8 +24,12 @@ func TestUserStorePersistsPasswordHash(t *testing.T) {
 	if err := reloaded.Load(); err != nil {
 		t.Fatalf("reload Load() error = %v", err)
 	}
-	if _, err := reloaded.Login("admin", "admin123"); err != nil {
+	login, err := reloaded.Login("admin", "admin123")
+	if err != nil {
 		t.Fatalf("Login(admin) after reload error = %v", err)
+	}
+	if !login.RequiresPasswordChange {
+		t.Fatal("bootstrap admin login did not require a password change")
 	}
 }
 
@@ -58,6 +62,52 @@ func TestUserStoreRefreshesAndRevokesExistingSessions(t *testing.T) {
 	}
 	if _, err := s.ValidateSession(login.Token); err == nil {
 		t.Fatal("deleted user's session remained valid")
+	}
+}
+
+func TestUserStoreRequiresAndCompletesFirstLoginPasswordChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "users.json")
+	s := NewUserStore(path)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	login, err := s.Login("admin", "admin123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !login.RequiresPasswordChange {
+		t.Fatal("default administrator was not marked for password change")
+	}
+	session, err := s.ValidateSession(login.Token)
+	if err != nil || !session.MustChangePassword {
+		t.Fatalf("bootstrap session = %#v, %v", session, err)
+	}
+	admin := s.List()[0]
+	if err := s.ChangePassword(admin.ID, "admin123", "new-secret-123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ValidateSession(login.Token); err == nil {
+		t.Fatal("password change did not revoke the bootstrap session")
+	}
+	newLogin, err := s.Login("admin", "new-secret-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newLogin.RequiresPasswordChange {
+		t.Fatal("password-change requirement remained after changing password")
+	}
+}
+
+func TestUserStoreRejectsReusingBootstrapPassword(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "users.json")
+	s := NewUserStore(path)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	admin := s.List()[0]
+	if err := s.ChangePassword(admin.ID, "admin123", "admin123"); err == nil {
+		t.Fatal("ChangePassword accepted the existing bootstrap password")
 	}
 }
 
@@ -114,7 +164,7 @@ func TestUserResponseDoesNotExposePassword(t *testing.T) {
 	}
 	user := model.User{Username: "admin", Password: hash, Role: "admin"}
 	resp := user.ToResponse()
-	if resp.Username != "admin" || resp.Role != "admin" {
+	if resp.Username != "admin" || resp.Role != "admin" || resp.MustChangePassword {
 		t.Fatalf("unexpected response: %#v", resp)
 	}
 }

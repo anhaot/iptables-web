@@ -129,7 +129,12 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusConflict, "update_failed", err.Error())
 		return
 	}
-	respondOK(w, updated.ToResponse())
+	stored, err := h.userStore.Get(id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "update_failed", err.Error())
+		return
+	}
+	respondOK(w, stored.ToResponse())
 }
 
 func (h *UserHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {

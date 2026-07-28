@@ -118,7 +118,11 @@ func authMiddleware(cfg *authConfig) func(http.Handler) http.Handler {
 			// Auth enabled — require either valid session or API key
 
 			// 1. Check session (already attached above)
-			if _, ok := r.Context().Value(sessionKey).(*store.Session); ok {
+			if sess, ok := r.Context().Value(sessionKey).(*store.Session); ok {
+				if sess.MustChangePassword && !isPasswordChangeAllowedPath(r.URL.Path) {
+					respondError(w, http.StatusForbidden, "password_change_required", "首次登录必须修改密码")
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -147,6 +151,7 @@ func isPublicPath(path string) bool {
 		"/",
 		"/index.html",
 		"/login.html",
+		"/change-password.html",
 		"/favicon.ico",
 		"/favicon.svg",
 	}
@@ -160,6 +165,12 @@ func isPublicPath(path string) bool {
 		return true
 	}
 	return false
+}
+
+func isPasswordChangeAllowedPath(path string) bool {
+	return path == "/api/v1/auth/session" ||
+		path == "/api/v1/auth/password" ||
+		path == "/api/v1/auth/logout"
 }
 
 // adminRequired is middleware that checks the session has admin role.
@@ -263,7 +274,7 @@ func rateLimitMiddleware(limit int, window time.Duration) func(http.Handler) htt
 }
 
 func shouldSkipRateLimit(path string) bool {
-	if path == "/" || path == "/login.html" || path == "/favicon.ico" {
+	if path == "/" || path == "/login.html" || path == "/change-password.html" || path == "/favicon.ico" {
 		return true
 	}
 	if strings.HasPrefix(path, "/css/") || strings.HasPrefix(path, "/js/") {

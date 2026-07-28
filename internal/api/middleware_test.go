@@ -1,14 +1,20 @@
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"iptables-web/internal/store"
 )
 
 func TestShouldSkipRateLimitForStaticAndHealth(t *testing.T) {
 	t.Parallel()
 
-	for _, path := range []string{"/", "/login.html", "/favicon.ico", "/css/base.css", "/js/app.js", "/api/v1/health"} {
+	for _, path := range []string{"/", "/login.html", "/change-password.html", "/favicon.ico", "/css/base.css", "/js/app.js", "/api/v1/health"} {
 		if !shouldSkipRateLimit(path) {
 			t.Fatalf("shouldSkipRateLimit(%q) = false, want true", path)
 		}
@@ -42,9 +48,49 @@ func TestShouldRateLimitAPI(t *testing.T) {
 func TestAuthPublicPathsAllowFrontendShell(t *testing.T) {
 	t.Parallel()
 
-	for _, path := range []string{"/", "/index.html", "/login.html", "/favicon.ico", "/favicon.svg", "/css/base.css", "/js/app.js", "/api/v1/health", "/api/v1/auth/login", "/api/v1/auth/captcha"} {
+	for _, path := range []string{"/", "/index.html", "/login.html", "/change-password.html", "/favicon.ico", "/favicon.svg", "/css/base.css", "/js/app.js", "/api/v1/health", "/api/v1/auth/login", "/api/v1/auth/captcha"} {
 		if !isPublicPath(path) {
 			t.Fatalf("isPublicPath(%q) = false, want true", path)
+		}
+	}
+}
+
+func TestAuthRequiresBootstrapPasswordChangeBeforeOtherAPIs(t *testing.T) {
+	t.Setenv("AUTH_ENABLED", "true")
+	users := store.NewUserStore(filepath.Join(t.TempDir(), "users.json"))
+	if err := users.Load(); err != nil {
+		t.Fatal(err)
+	}
+	login, err := users.Login("admin", "admin123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := newAuthConfig(users)
+	called := false
+	handler := authMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	blocked := httptest.NewRequest(http.MethodGet, "/api/v1/rules", nil)
+	blocked.Header.Set("Authorization", "Bearer "+login.Token)
+	blockedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(blockedRecorder, blocked)
+	if blockedRecorder.Code != http.StatusForbidden || !strings.Contains(blockedRecorder.Body.String(), "password_change_required") {
+		t.Fatalf("blocked status=%d body=%s", blockedRecorder.Code, blockedRecorder.Body.String())
+	}
+	if called {
+		t.Fatal("protected handler was called before bootstrap password change")
+	}
+
+	for _, path := range []string{"/api/v1/auth/session", "/api/v1/auth/password", "/api/v1/auth/logout"} {
+		called = false
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer "+login.Token)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		if !called || recorder.Code != http.StatusNoContent {
+			t.Fatalf("%s called=%v status=%d", path, called, recorder.Code)
 		}
 	}
 }

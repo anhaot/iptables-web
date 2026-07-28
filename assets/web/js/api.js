@@ -36,7 +36,11 @@ async function apiRequest(method, path, body, rawJSON) {
     }
     const json = await resp.json();
     if (!resp.ok) {
-      throw new ApiError(resp.status, json.error?.code || 'unknown', json.error?.message || resp.statusText);
+      const code = json.error?.code || 'unknown';
+      if (resp.status === 403 && code === 'password_change_required' && window.location.pathname !== '/change-password.html') {
+        window.location.href = '/change-password.html';
+      }
+      throw new ApiError(resp.status, code, json.error?.message || resp.statusText);
     }
     return json.data;
   } catch (err) {

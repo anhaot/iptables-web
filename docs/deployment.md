@@ -23,6 +23,8 @@ FIREWALL_BACKEND=auto
 
 安装器不会执行任何 `firewall-cmd`，也不会修改 firewalld。默认不修改 iptables 或 nftables；新安装的规则文件为空，服务启动不会新增 packet 规则。
 
+首次登录账号为 `admin/admin123`。登录后必须先修改密码；完成前，服务端只允许会话检查、改密和退出。
+
 ## 2. 自定义预编译安装
 
 ```bash

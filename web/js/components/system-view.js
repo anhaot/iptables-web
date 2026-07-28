@@ -260,9 +260,8 @@ const SystemView = {
     }
     try {
       await api.changePassword(oldPwd, newPwd);
-      Toasts.success('密码已修改');
-      this.showPasswordModal = false;
-      this.render();
+      sessionStorage.clear();
+      window.location.href = '/login.html?password_changed=1';
     } catch (e) {
       Toasts.error(e.message);
     }
@@ -300,7 +299,8 @@ const SystemView = {
         html += '<tr>' +
           '<td><span style="font-weight:600">' + escapeHtml(u.username) + '</span></td>' +
           '<td><span class="badge ' + (u.role === 'admin' ? 'badge-log' : 'badge-return') + '">' +
-            (u.role === 'admin' ? '管理员' : '普通用户') + '</span></td>' +
+            (u.role === 'admin' ? '管理员' : '普通用户') + '</span>' +
+            (u.must_change_password ? ' <span class="badge badge-drop">待改密</span>' : '') + '</td>' +
           '<td>' + formatDate(u.created_at) + '</td>' +
           '<td>' + formatDate(u.updated_at) + '</td>';
         if (role === 'admin') {

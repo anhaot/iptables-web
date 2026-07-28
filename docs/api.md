@@ -155,3 +155,15 @@ curl -X POST -H 'Content-Type: application/json' \
 | GET | `/users` | 用户列表 |
 | POST | `/users` | 管理员新增用户 |
 | GET/PUT/DELETE | `/users/{id}` | 查看/管理员修改/删除 |
+
+登录和会话响应包含：
+
+```json
+{
+  "username": "admin",
+  "role": "admin",
+  "requires_password_change": true
+}
+```
+
+默认管理员、管理员新建用户以及被管理员重置密码的用户会得到 `requires_password_change=true`。该状态下只有 `/auth/session`、`/auth/password` 和 `/auth/logout` 可访问；其他受保护接口返回 HTTP 403 和错误码 `password_change_required`。本人成功修改密码后，旧会话会被撤销，必须使用新密码重新登录。

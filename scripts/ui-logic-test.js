@@ -101,6 +101,10 @@ assert.match(systemUI, /回滚最近变更/);
 const loginUI = fs.readFileSync(require.resolve('../web/login.html'), 'utf8');
 assert.doesNotMatch(loginUI, /iptables 与 nftables 双后端/);
 assert.match(loginUI, /iptables-nft 兼容后端/);
+assert.match(loginUI, /requires_password_change/);
+const passwordChangeUI = fs.readFileSync(require.resolve('../web/change-password.html'), 'utf8');
+assert.match(passwordChangeUI, /首次登录，请修改密码/);
+assert.match(passwordChangeUI, /\/api\/v1\/auth\/password/);
 assert.ok(fs.existsSync(require.resolve('../web/favicon.svg')));
 
-process.stdout.write('UI rule preview, audit, rollback, and Docker logic verified\n');
+process.stdout.write('UI auth, rule preview, audit, rollback, and Docker logic verified\n');

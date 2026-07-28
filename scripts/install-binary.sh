@@ -278,7 +278,7 @@ print_summary() {
 		info "  访问地址: http://${access_host}:${LISTEN_PORT}"
 	fi
 	info "  认证状态: AUTH_ENABLED=${AUTH_ENABLED}"
-	info "  默认账号: admin / admin123（首次登录后请立即修改）"
+	info "  默认账号: admin / admin123（首次登录必须修改密码）"
 	info "  规则数据: ${DATA_DIR}/rules.json"
 	info "  用户数据: ${DATA_DIR}/users.json"
 	info "  卸载命令: sudo bash ${INSTALL_DIR}/uninstall.sh"

@@ -222,6 +222,12 @@
     }
     .login-error.show { display: flex; }
     .login-error .err-icon { flex-shrink: 0; font-size: 0.9rem; }
+    .login-success {
+      display: none; padding: 0.65rem 0.9rem; margin-bottom: 1.15rem;
+      color: #047857; background: #ecfdf5; border: 1px solid #a7f3d0;
+      border-radius: 10px; font-size: 0.8rem;
+    }
+    .login-success.show { display: block; }
 
     /* Submit button */
     .btn-login {
@@ -307,6 +313,7 @@
         <span class="err-icon">!</span>
         <span id="error-text"></span>
       </div>
+      <div id="login-success" class="login-success">密码修改成功，请使用新密码重新登录。</div>
 
       <form onsubmit="return handleLogin(event)" autocomplete="off">
         <!-- Username -->
@@ -429,7 +436,8 @@
       sessionStorage.setItem('auth_token', data.data.token);
       sessionStorage.setItem('auth_username', data.data.username);
       sessionStorage.setItem('auth_role', data.data.role);
-      window.location.href = '/index.html';
+      sessionStorage.setItem('requires_password_change', data.data.requires_password_change ? 'true' : 'false');
+      window.location.href = data.data.requires_password_change ? '/change-password.html' : '/index.html';
     } catch (err) {
       showError('网络连接失败，请检查网络');
       await refreshCaptcha();
@@ -447,7 +455,10 @@
         headers: { 'Authorization': 'Bearer ' + token }
       });
       if (resp.ok) {
-        window.location.href = '/index.html';
+        var result = await resp.json();
+        var required = !!(result.data && result.data.requires_password_change);
+        sessionStorage.setItem('requires_password_change', required ? 'true' : 'false');
+        window.location.href = required ? '/change-password.html' : '/index.html';
         return true;
       }
     } catch (e) {
@@ -458,7 +469,12 @@
   }
 
   redirectIfAlreadyLoggedIn().then(function(redirecting) {
-    if (!redirecting) refreshCaptcha();
+    if (!redirecting) {
+      if (new URLSearchParams(window.location.search).get('password_changed') === '1') {
+        document.getElementById('login-success').className = 'login-success show';
+      }
+      refreshCaptcha();
+    }
   });
 </script>
 </body>

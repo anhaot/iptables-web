@@ -7,12 +7,13 @@ import (
 )
 
 type User struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Password  string    `json:"password,omitempty"` // stored hash; never return through API responses
-	Role      string    `json:"role"`               // admin, user
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                 string    `json:"id"`
+	Username           string    `json:"username"`
+	Password           string    `json:"password,omitempty"` // stored hash; never return through API responses
+	Role               string    `json:"role"`               // admin, user
+	MustChangePassword bool      `json:"must_change_password,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 func (u *User) Validate() error {
@@ -38,9 +39,10 @@ type LoginRequest struct {
 
 // LoginResponse is returned on successful login
 type LoginResponse struct {
-	Token    string `json:"token"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	Token                  string `json:"token"`
+	Username               string `json:"username"`
+	Role                   string `json:"role"`
+	RequiresPasswordChange bool   `json:"requires_password_change"`
 }
 
 // CreateUserRequest is the body for creating or updating a user.
@@ -52,19 +54,21 @@ type CreateUserRequest struct {
 
 // UserResponse is the safe representation of a user (no password)
 type UserResponse struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Role      string    `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                 string    `json:"id"`
+	Username           string    `json:"username"`
+	Role               string    `json:"role"`
+	MustChangePassword bool      `json:"must_change_password"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 func (u *User) ToResponse() UserResponse {
 	return UserResponse{
-		ID:        u.ID,
-		Username:  u.Username,
-		Role:      u.Role,
-		CreatedAt: u.CreatedAt,
-		UpdatedAt: u.UpdatedAt,
+		ID:                 u.ID,
+		Username:           u.Username,
+		Role:               u.Role,
+		MustChangePassword: u.MustChangePassword,
+		CreatedAt:          u.CreatedAt,
+		UpdatedAt:          u.UpdatedAt,
 	}
 }
