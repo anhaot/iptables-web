@@ -59,50 +59,171 @@ iptables-web 主要处理以下场景：
 
 ## 实现原理
 
-iptables-web 由一个 Go 服务端和原生 HTML/CSS/JavaScript 前端组成，前端资源通过 Go `embed` 编入单个二进制。
+### 先用一句话理解
+
+iptables-web 并不是让浏览器直接执行 `iptables` 命令，而是把你在网页中填写的规则变成一份结构化请求，交给 Go 服务端完成校验、写入、核验、审计和失败恢复。
+
+例如，你在页面中创建“只允许 `10.10.0.0/16` 访问 Docker 发布端口 `10089`”，完整过程是：
+
+1. 页面收集链、来源地址、端口和动作，先显示变更预览，此时不会修改防火墙。
+2. 点击确认后，浏览器把规则作为 JSON 发送给 Go API。
+3. 服务端检查登录状态、首次改密状态和管理员权限。
+4. 服务端校验 IP、端口、链、动作和规则顺序，拒绝无法命中或可能误伤流量的组合。
+5. 服务端保存变更前快照，并将本次写操作与其他写操作串行执行。
+6. 规则先写入 `rules.json`，再转换为实际的 iptables 参数。
+7. 命令执行后，服务端重新读取运行状态进行核验；执行或保存失败会恢复变更前状态。
+8. 最后记录操作者、来源地址、修改内容和执行结果，并开启 10 分钟回滚窗口。
+
+### 程序由哪些部分组成
+
+项目由一个 Go 服务端和原生 HTML、CSS、JavaScript 前端组成。前端资源通过 Go `embed` 编入二进制，因此部署时只需要一个服务程序和数据目录，不需要单独安装 Node.js、数据库或 Web 服务器。
 
 ```text
 浏览器
-  │  登录 / 预览 / 确认
+  │  登录、填写规则、预览并确认
   ▼
 Go HTTP API
-  ├─ 会话与角色校验
-  ├─ 参数和规则顺序校验
-  ├─ 变更审计与回滚快照
-  └─ JSON 原子持久化
+  ├─ 验证会话、首次改密状态和角色权限
+  ├─ 校验 IP、端口、链、动作和执行顺序
+  ├─ 保存变更前快照
+  ├─ 原子更新 JSON 数据
+  └─ 记录审计事件
         │
         ▼
 iptables 执行层
-  ├─ xtables 锁等待
-  ├─ 命令超时
-  ├─ 所有权 comment
-  └─ 写入后核验
+  ├─ 等待 xtables 系统锁，避免与其他工具同时写入
+  ├─ 为命令设置超时
+  ├─ 使用 comment 标记程序拥有的规则
+  ├─ 按链和位置写入规则
+  └─ 写入后重新读取并核验
         │
         ▼
-Linux packet filter
+Linux 内核中的 packet filter
 ```
 
-Docker 发布端口经过 DNAT 后，普通目标端口可能已经变成容器端口。程序使用 conntrack 的 `--ctorigdst`、`--ctorigdstport` 和 `--ctdir ORIGINAL` 匹配访问者最初请求的宿主机地址和端口。
+### 网页中的规则和系统规则是什么关系
 
-规则、用户、审计和回滚数据分别保存在独立文件中。所有管理写请求串行执行；审计中间件比较操作前后的快照并记录差异，成功的规则变更同时保存限时回滚快照。
+程序同时维护两种状态：
 
-更多技术细节参见[架构说明](docs/architecture.md)和[安全说明](docs/security.md)。
+- `rules.json` 是“希望系统保持的规则”，用于页面展示、重启恢复和判断规则归属；
+- Linux 内核中的 iptables 是“当前真正生效的规则”，决定网络数据包是否放行。
+
+新增、编辑、启停、删除和排序时，服务端会根据 `rules.json` 重新同步对应链，并检查运行状态。服务启动后也会重新同步已启用规则，所以宿主机或容器重启后不需要手工重新添加。
+
+程序为自己写入的规则增加所有权标记。删除、同步和卸载时只处理这些托管规则，不会 `flush` 整条链，也不会删除 Docker、firewalld 或其他工具创建的规则。
+
+### 为什么宿主机端口和 Docker 端口处理方式不同
+
+宿主机服务和 Docker 发布端口经过的网络路径不同：
+
+```text
+访问宿主机 SSH / 管理页面
+客户端 ──► 宿主机端口 ──► INPUT ──► 宿主机进程
+
+访问 Docker 发布端口
+客户端 ──► 宿主机:10089 ──► DNAT ──► 容器:8080
+                              │
+                              └──► FORWARD ──► DOCKER-USER
+```
+
+因此：
+
+- SSH、宿主机 Web 服务和数据库通常在 `INPUT` 链管理；
+- Docker bridge/NAT 发布端口通常在 `DOCKER_USER` 链管理；
+- `-p 10089:8080` 经过 DNAT 后，普通 `dport` 看到的可能已经是容器端口 `8080`，而不是用户访问的宿主机端口 `10089`。
+
+为避免匹配错端口，程序使用 conntrack 的 `--ctorigdst`、`--ctorigdstport` 和 `--ctdir ORIGINAL`，按连接最初访问的宿主机 IP 和端口匹配。Docker 白名单会让指定来源的 `ACCEPT` 位于兜底 `DROP` 或 `REJECT` 之前，并在保存前检查顺序。
+
+### 数据如何保存和恢复
+
+默认数据目录中包含：
+
+| 文件 | 保存内容 | 用途 |
+| --- | --- | --- |
+| `rules.json` | 页面托管的规则 | 展示、同步和重启恢复 |
+| `users.json` | 用户、密码哈希、角色和强制改密状态 | 身份认证和权限控制 |
+| `audit.jsonl` | 每次管理员变更的追加记录 | 查询责任人和修改内容 |
+| `rollback.json` | 最近一次规则变更前的快照 | 10 分钟内快速恢复 |
+
+JSON 数据使用临时文件写入并原子替换，避免进程中断时留下半个文件。完整备份还会包含 `iptables-save` 导出的 IPv4、可用时的 IPv6 规则集和托管规则清单。
+
+### 登录和首次改密如何保证不能绕过
+
+登录成功后，服务端创建会话，浏览器把 Token 保存在当前标签页的 `sessionStorage` 中，后续 API 请求通过 Bearer Token 携带会话身份。
+
+默认管理员、新建用户和被管理员重置密码的用户会带有“必须修改密码”状态。这个限制不只存在于页面跳转中：认证中间件会在服务端拒绝其他管理 API，只允许会话检查、修改本人密码和退出。改密成功后，服务端清除该状态并撤销用户的全部旧会话。
+
+当前服务直接提供 HTTP，传输加密需要由 HTTPS 反向代理提供。不要把 HTTP 管理端口直接暴露到不可信网络。
+
+### 审计和回滚如何工作
+
+规则或用户发生变更时，审计中间件会比较操作前后的快照，记录操作者、来源地址、请求 ID、HTTP 结果和字段变化，但不会记录密码或会话 Token。
+
+每次成功修改托管规则后，程序保存修改前快照并开启 10 分钟回滚窗口。回滚时会先保存当前状态，再恢复旧规则并重新核验，因此成功回滚后仍可以反向恢复。审计和回滚针对本程序管理的内容，不等同于操作系统级审计。
+
+### 规则助手为什么不会直接执行命令
+
+规则助手用于生成或解释 iptables、ip6tables、nftables 和 firewalld 文本，帮助管理员理解命令。生成结果只展示和复制，不会自动执行；Web 规则管理仍只写入 iptables 或 iptables-nft 兼容后端。
+
+更底层的模型和执行约束参见[架构说明](docs/architecture.md)，部署边界参见[安全说明](docs/security.md)。
 
 ## 功能截图
 
-### 仪表盘
+点击图片可以查看原始尺寸。
 
-![iptables-web 仪表盘](docs/images/dashboard.png)
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/login.png"><img src="docs/images/login.png" alt="登录页面"></a><br>
+      <sub>登录：账号密码、验证码和登录状态提示</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/first-login-password.png"><img src="docs/images/first-login-password.png" alt="首次登录强制修改密码"></a><br>
+      <sub>首次改密：完成前服务端不会开放其他管理接口</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/dashboard.png"><img src="docs/images/dashboard.png" alt="iptables-web 仪表盘"></a><br>
+      <sub>仪表盘：系统、规则和 Docker 端口概览</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/rules.png"><img src="docs/images/rules.png" alt="防火墙规则管理"></a><br>
+      <sub>规则管理：搜索、分链查看、启停、编辑和排序</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/rule-editor.png"><img src="docs/images/rule-editor.png" alt="规则编辑与变更预览"></a><br>
+      <sub>规则编辑：填写匹配条件并在写入前核对字段变化</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/chains.png"><img src="docs/images/chains.png" alt="实时链浏览器"></a><br>
+      <sub>链浏览器：只读查看系统当前的 packet 链和规则</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/docker-policy.png"><img src="docs/images/docker-policy.png" alt="Docker 发布端口访问策略"></a><br>
+      <sub>Docker 端口：查看发布映射、允许来源和兜底规则</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/rule-assistant.png"><img src="docs/images/rule-assistant.png" alt="防火墙规则助手"></a><br>
+      <sub>规则助手：按场景生成命令或解释已有命令</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/system-management.png"><img src="docs/images/system-management.png" alt="系统管理、备份、审计和回滚"></a><br>
+      <sub>系统管理：用户、备份、恢复、审计和限时回滚</sub>
+    </td>
+    <td width="50%" valign="middle">
+      <strong>截图说明</strong><br><br>
+      截图来自 <code>DEV_MODE=true</code> 的本地演示环境。开发后端不会修改主机防火墙；页面流程、API 校验、数据持久化和审计逻辑与正常模式一致。
+    </td>
+  </tr>
+</table>
 
-### Docker 端口与访问策略
-
-![Docker 发布端口与访问策略](docs/images/docker-policy.png)
-
-### 管理员审计与限时回滚
-
-![管理员变更审计与限时回滚](docs/images/change-audit.png)
-
-截图来自 `DEV_MODE=true` 的本地演示环境，不会修改主机防火墙。
 
 ## 安装部署
 
@@ -240,11 +361,13 @@ bash -n scripts/*.sh
 构建发布包：
 
 ```bash
-VERSION=<版本号> bash scripts/build-package.sh
-bash scripts/verify-package.sh dist/iptables-web-<版本号>-linux-amd64.tar.gz
+VERSION=0.1.0 bash scripts/build-package.sh
+bash scripts/verify-package.sh dist/iptables-web-0.1.0-linux-amd64.tar.gz
 ```
 
-发布压缩包上传到 GitHub Releases，不提交到源码分支。贡献代码前请阅读[贡献指南](CONTRIBUTING.md)。
+正式版本使用 `v主版本.次版本.修订版本` 格式，例如 `v0.1.0`。版本 Tag 推送后，GitHub Actions 会运行测试、构建 Linux amd64 压缩包和 SHA-256 校验文件，并创建对应的 GitHub Release。发布产物不会提交到源码分支。
+
+贡献代码前请阅读[贡献指南](CONTRIBUTING.md)。
 
 ## 文档
 
