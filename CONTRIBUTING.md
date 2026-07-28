@@ -10,7 +10,7 @@
 
 ## 变更原则
 
-- 保持默认监听 localhost、默认开启认证的安全基线。
+- 保持默认开启认证、安装器不自动修改 firewalld 的安全基线。
 - 不使用 shell 拼接任何来自请求的数据；外部命令必须使用独立参数。
 - 不 flush 非本程序独占的系统链。
 - 规则写入失败时保持 JSON 管理态与内核运行态尽可能一致。
@@ -35,7 +35,9 @@ go run ./cmd/server
 ```bash
 gofmt -w <changed-go-files>
 GOCACHE=/tmp/iptables-web-go-cache go test ./...
+go test -race ./...
 go vet ./...
+node scripts/ui-logic-test.js
 ```
 
 只改文档时也应检查相对链接、命令路径、环境变量名和 API 方法是否与实现一致。
@@ -59,5 +61,12 @@ go vet ./...
 - 日常操作和事故处置放在 `docs/operations.md`。
 - 内部组件和设计边界放在 `docs/architecture.md`。
 - 尚未实现的功能只放在 `docs/roadmap.md`，不要写成现有能力。
+
+## 仓库边界
+
+- 提交源码、测试、脚本、用户文档和必要的文档截图。
+- 不提交 `bin/`、`dist/`、浏览器测试输出、覆盖率文件、本地审查报告或运行数据。
+- 发布压缩包和校验和上传到 GitHub Releases，不放入源码分支。
+- `.env`、Token、API Key、`users.json`、`audit.jsonl` 和真实防火墙备份不得提交。
 
 更详细的字段、路由和发布检查项见 [开发指南](docs/development.md)。

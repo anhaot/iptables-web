@@ -147,6 +147,8 @@ func isPublicPath(path string) bool {
 		"/",
 		"/index.html",
 		"/login.html",
+		"/favicon.ico",
+		"/favicon.svg",
 	}
 	for _, p := range public {
 		if path == p {

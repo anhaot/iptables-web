@@ -7,6 +7,8 @@
 | `LISTEN_ADDR` | `0.0.0.0:33801` | Go `host:port` | 默认接受外部连接；是否能到达仍取决于现有防火墙和网络策略 |
 | `RULES_FILE` | `/data/rules.json` | 绝对路径 | 程序托管规则 |
 | `USERS_FILE` | 规则文件同目录下 `users.json` | 绝对路径 | 用户数据；会话和验证码仅保存在内存中 |
+| `AUDIT_FILE` | 规则文件同目录下 `audit.jsonl` | 绝对路径 | 追加式管理员变更审计日志，文件权限为 0600 |
+| `ROLLBACK_FILE` | 规则文件同目录下 `rollback.json` | 绝对路径 | 最近一次成功规则变更的 10 分钟回滚快照，文件权限为 0600 |
 | `LOG_LEVEL` | `info` | `debug`、`info`、`warn`、`error`、`off` | 全局日志级别 |
 | `AUTH_ENABLED` | `true` | `true` / `false` | 生产环境应保持开启 |
 | `API_KEY` | 空 | 字符串 | 自动化脚本可选认证方式 |

@@ -26,8 +26,8 @@ Go 二进制嵌入 `assets/web`。构建脚本会先把 `web` 同步到该目录
 ## 发布预编译包
 
 ```bash
-VERSION=20260717.11 bash scripts/build-package.sh
-bash scripts/verify-package.sh dist/iptables-web-20260717.11-linux-amd64.tar.gz
+VERSION=<版本号> bash scripts/build-package.sh
+bash scripts/verify-package.sh dist/iptables-web-<版本号>-linux-amd64.tar.gz
 ```
 
 包必须包含二进制、`install-binary.sh`、`uninstall.sh`、README、docs、VERSION 和 SHA-256。离线验证会确认：
@@ -40,3 +40,5 @@ bash scripts/verify-package.sh dist/iptables-web-20260717.11-linux-amd64.tar.gz
 - 卸载支持托管规则清理和 purge。
 
 验证不会启动服务或访问防火墙。
+
+`dist/` 是本地构建目录，不提交到 Git。通过校验的压缩包和 SHA-256 应上传到与版本 Tag 对应的 GitHub Release。

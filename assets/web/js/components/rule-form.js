@@ -2,17 +2,23 @@
 
 const RuleForm = {
   rule: null,
+  originalRule: null,
   callback: null,
   saving: false,
+  preview: null,
+  previewCandidate: null,
 
   open(rule, callback) {
-    this.rule = normalizeDockerPortCandidate(rule ? { ...rule, backend: 'packet', zone: '' } : {
-      backend: 'packet', zone: '', chain: 'FORWARD', action: 'DROP', protocol: 'tcp',
+    this.originalRule = rule ? { ...rule } : null;
+    this.rule = normalizeDockerPortCandidate(rule ? { ...rule, backend: 'packet' } : {
+      backend: 'packet', chain: 'FORWARD', action: 'DROP', protocol: 'tcp',
       source: '', dest: '', dport: '', original_dest: '', original_dport: '', sport: '', in_iface: '',
       out_iface: '', state: '', desc: '', enabled: true, position: 1,
     });
     this.callback = callback || (() => {});
     this.saving = false;
+    this.preview = null;
+    this.previewCandidate = null;
     this.render();
   },
 
@@ -37,7 +43,21 @@ const RuleForm = {
   },
 
   async save() {
-    const candidate = normalizeDockerPortCandidate({ ...this.rule, backend: 'packet', zone: '' });
+    const candidate = normalizeDockerPortCandidate({ ...this.rule, backend: 'packet' });
+    this.previewCandidate = candidate;
+    this.preview = buildRuleChangePreview(this.originalRule, candidate);
+    this.render();
+  },
+
+  backToEdit() {
+    this.preview = null;
+    this.previewCandidate = null;
+    this.render();
+  },
+
+  async confirmSave() {
+    const candidate = this.previewCandidate;
+    if (!candidate) return;
     if (isBroadDropRule(candidate) && !confirm('这条规则会丢弃整条链上的大量流量，可能导致管理端口或业务中断。确定继续保存吗？')) return;
     this.saving = true;
     this.render();
@@ -50,6 +70,8 @@ const RuleForm = {
     } catch (e) {
       Toasts.error('保存失败：' + e.message);
       this.saving = false;
+      this.preview = null;
+      this.previewCandidate = null;
       this.render();
     }
   },
@@ -96,9 +118,49 @@ const RuleForm = {
       <div class="form-group"><label class="form-label">规则位置</label><input class="form-input" type="number" min="1" value="${escapeHtml(String(r.position || 1))}" oninput="RuleForm.updateField('position',parseInt(this.value,10)||1)"><div class="form-hint">超出范围会自动放到链末尾；保存后可在具体链中拖动调整。</div></div>
       <div class="form-group"><label class="form-label"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="RuleForm.updateField('enabled',this.checked)" style="margin-right:.5rem">立即启用此规则</label></div>
       ${isEdit ? `<div style="font-size:.75rem;color:var(--text-muted)">ID: <span class="mono">${escapeHtml(r.id)}</span></div>` : ''}
-      <div class="modal-footer"><button class="btn btn-secondary" onclick="RuleForm.close()">取消</button><button class="btn btn-primary" onclick="RuleForm.save()" ${this.saving ? 'disabled' : ''}>${this.saving ? '保存中...' : (isEdit ? '更新规则' : '创建规则')}</button></div>`;
+      ${this.preview ? renderRuleChangePreview(this.preview) : ''}
+      <div class="modal-footer">
+        ${this.preview
+          ? `<button class="btn btn-secondary" onclick="RuleForm.backToEdit()" ${this.saving ? 'disabled' : ''}>返回修改</button><button class="btn btn-primary" onclick="RuleForm.confirmSave()" ${this.saving ? 'disabled' : ''}>${this.saving ? '保存中...' : '确认并保存'}</button>`
+          : `<button class="btn btn-secondary" onclick="RuleForm.close()">取消</button><button class="btn btn-primary" onclick="RuleForm.save()">预览变更</button>`}
+      </div>`;
   }
 };
+
+const RULE_PREVIEW_FIELDS = [
+  ['chain','链'], ['action','动作'], ['protocol','协议'], ['source','来源'], ['dest','目标'],
+  ['dport','目标端口'], ['original_dest','Docker 原始目标 IP'], ['original_dport','Docker 原始目标端口'],
+  ['sport','来源端口'], ['in_iface','入站网卡'], ['out_iface','出站网卡'], ['state','连接状态'],
+  ['position','位置'], ['enabled','启用状态'], ['desc','描述'],
+];
+
+function buildRuleChangePreview(before, after) {
+  const rows = [];
+  for (const [field, label] of RULE_PREVIEW_FIELDS) {
+    const oldValue = before ? previewValue(field, before[field]) : '—';
+    const newValue = previewValue(field, after[field]);
+    if ((!before && newValue !== '—') || (before && oldValue !== newValue)) {
+      rows.push({ field, label, before: oldValue, after: newValue });
+    }
+  }
+  return { mode: before ? 'update' : 'create', rows };
+}
+
+function previewValue(field, value) {
+  if (field === 'enabled') return value ? '已启用' : '已禁用';
+  if (value === undefined || value === null || value === '') return '—';
+  return String(value);
+}
+
+function renderRuleChangePreview(preview) {
+  const rows = preview.rows.length
+    ? preview.rows.map(row => `<tr><td>${escapeHtml(row.label)}</td><td class="mono">${escapeHtml(row.before)}</td><td class="mono">${escapeHtml(row.after)}</td></tr>`).join('')
+    : '<tr><td colspan="3">没有检测到字段变化。</td></tr>';
+  return `<div class="rule-change-preview">
+    <div class="alert alert-warning"><strong>变更预览：</strong>请核对规则作用范围和执行位置，确认后才会写入防火墙。</div>
+    <div class="table-container"><table><thead><tr><th>字段</th><th>变更前</th><th>变更后</th></tr></thead><tbody>${rows}</tbody></table></div>
+  </div>`;
+}
 
 function textField(label, field, value, placeholder) {
   return `<div class="form-group"><label class="form-label">${escapeHtml(label)}</label><input class="form-input" type="text" value="${escapeHtml(value || '')}" placeholder="${escapeHtml(placeholder)}" oninput="RuleForm.updateField('${field}',this.value)"></div>`;
@@ -116,5 +178,5 @@ function normalizeDockerPortCandidate(rule) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { isBroadDropRule, normalizeDockerPortCandidate };
+  module.exports = { isBroadDropRule, normalizeDockerPortCandidate, buildRuleChangePreview };
 }

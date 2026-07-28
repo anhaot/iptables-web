@@ -16,6 +16,7 @@ import (
 
 	"iptables-web/assets"
 	"iptables-web/internal/api"
+	"iptables-web/internal/change"
 	"iptables-web/internal/iptables"
 	appLog "iptables-web/internal/logging"
 	"iptables-web/internal/model"
@@ -25,18 +26,22 @@ import (
 var version = "dev"
 
 type Config struct {
-	ListenAddr string
-	RulesFile  string
-	UsersFile  string
-	LogLevel   string
+	ListenAddr   string
+	RulesFile    string
+	UsersFile    string
+	AuditFile    string
+	RollbackFile string
+	LogLevel     string
 }
 
 func LoadConfig() *Config {
 	cfg := &Config{
-		ListenAddr: "0.0.0.0:33801",
-		RulesFile:  "/data/rules.json",
-		UsersFile:  "/data/users.json",
-		LogLevel:   "info",
+		ListenAddr:   "0.0.0.0:33801",
+		RulesFile:    "/data/rules.json",
+		UsersFile:    "/data/users.json",
+		AuditFile:    "/data/audit.jsonl",
+		RollbackFile: "/data/rollback.json",
+		LogLevel:     "info",
 	}
 	if v := os.Getenv("LISTEN_ADDR"); v != "" {
 		cfg.ListenAddr = v
@@ -46,9 +51,21 @@ func LoadConfig() *Config {
 		if cfg.UsersFile == "/data/users.json" {
 			cfg.UsersFile = filepath.Join(filepath.Dir(v), "users.json")
 		}
+		if cfg.AuditFile == "/data/audit.jsonl" {
+			cfg.AuditFile = filepath.Join(filepath.Dir(v), "audit.jsonl")
+		}
+		if cfg.RollbackFile == "/data/rollback.json" {
+			cfg.RollbackFile = filepath.Join(filepath.Dir(v), "rollback.json")
+		}
 	}
 	if v := os.Getenv("USERS_FILE"); v != "" {
 		cfg.UsersFile = v
+	}
+	if v := os.Getenv("AUDIT_FILE"); v != "" {
+		cfg.AuditFile = v
+	}
+	if v := os.Getenv("ROLLBACK_FILE"); v != "" {
+		cfg.RollbackFile = v
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
@@ -141,6 +158,7 @@ func main() {
 
 	// Create handler and router
 	apiHandler := api.NewHandler(ruleStore, exe)
+	apiHandler.SetChangeManager(change.NewManager(cfg.AuditFile, cfg.RollbackFile, 10*time.Minute))
 	authHandler := api.NewAuthHandler(userStore)
 	userHandler := api.NewUserHandler(userStore)
 	router := api.NewRouter(apiHandler, authHandler, userHandler, userStore, assets.WebFS)

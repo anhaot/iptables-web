@@ -51,6 +51,21 @@ func TestLoadConfigAllowsLocalOnlyOverride(t *testing.T) {
 	}
 }
 
+func TestLoadConfigKeepsChangeFilesBesideRules(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RULES_FILE", filepath.Join(dir, "rules.json"))
+	t.Setenv("USERS_FILE", "")
+	t.Setenv("AUDIT_FILE", "")
+	t.Setenv("ROLLBACK_FILE", "")
+	cfg := LoadConfig()
+	if cfg.AuditFile != filepath.Join(dir, "audit.jsonl") {
+		t.Fatalf("AuditFile = %q", cfg.AuditFile)
+	}
+	if cfg.RollbackFile != filepath.Join(dir, "rollback.json") {
+		t.Fatalf("RollbackFile = %q", cfg.RollbackFile)
+	}
+}
+
 func TestMigrateLegacyDockerDPortRules(t *testing.T) {
 	t.Setenv("DEV_MODE", "true")
 	path := filepath.Join(t.TempDir(), "rules.json")

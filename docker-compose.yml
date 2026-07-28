@@ -27,6 +27,8 @@ services:
       - LISTEN_ADDR=0.0.0.0:33801
       - RULES_FILE=/data/rules.json
       - USERS_FILE=/data/users.json
+      - AUDIT_FILE=/data/audit.jsonl
+      - ROLLBACK_FILE=/data/rollback.json
       - LOG_LEVEL=info
       - TZ=Asia/Shanghai
       - AUTH_ENABLED=true

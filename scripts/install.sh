@@ -266,6 +266,8 @@ Type=simple
 ExecStart=${BIN_DIR}/${APP_NAME}
 Environment=RULES_FILE=${DATA_DIR}/rules.json
 Environment=USERS_FILE=${DATA_DIR}/users.json
+Environment=AUDIT_FILE=${DATA_DIR}/audit.jsonl
+Environment=ROLLBACK_FILE=${DATA_DIR}/rollback.json
 Environment=LISTEN_ADDR=${LISTEN_ADDR}
 Environment=LOG_LEVEL=info
 Environment=AUTH_ENABLED=${AUTH_ENABLED}

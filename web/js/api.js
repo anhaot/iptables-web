@@ -98,6 +98,26 @@ const api = {
   restoreRules: (data, backend) => apiRequest('POST', `/system/restore?backend=${encodeURIComponent(backend || 'packet')}`, { data }),
   restoreRulesFile: (jsonText, backend) => apiRequest('POST', `/system/restore?backend=${encodeURIComponent(backend || 'packet')}`, jsonText, true),
   clearManagedRules: () => apiRequest('DELETE', '/system/managed-rules'),
+  listAuditEvents: (limit) => apiRequest('GET', `/system/audit?limit=${encodeURIComponent(limit || 50)}`),
+  getRollbackStatus: () => apiRequest('GET', '/system/rollback'),
+  rollbackLastChange: (id) => apiRequest('POST', '/system/rollback', { id }),
+  downloadAudit: () => {
+    const headers = {};
+    const token = getAuthToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    return fetch(`${API_BASE}/system/audit?download=1`, { headers }).then(r => {
+      if (r.status === 401) {
+        sessionStorage.clear();
+        window.location.href = '/login.html';
+        throw new Error('请先登录');
+      }
+      if (r.status === 403) throw new Error('需要管理员权限');
+      if (!r.ok) throw new Error('审计日志导出失败');
+      const disposition = r.headers.get('Content-Disposition') || '';
+      const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+      return r.blob().then(blob => ({ blob, filename: filenameMatch ? filenameMatch[1] : '' }));
+    });
+  },
 
   // Docker
   getDockerMappings: () => apiRequest('GET', '/docker/mappings'),

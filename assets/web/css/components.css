@@ -821,6 +821,235 @@ tr:hover td {
   font-weight: 600;
 }
 
+/* ===== Docker access policy cards ===== */
+.docker-policy-filter {
+  width: auto;
+  min-width: 145px;
+}
+
+.docker-policy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.docker-policy-card {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+}
+
+.docker-policy-card.docker-policy-success { border-left-color: var(--success); }
+.docker-policy-card.docker-policy-warning { border-left-color: var(--warning); }
+.docker-policy-card.docker-policy-danger { border-left-color: var(--danger); }
+.docker-policy-card.docker-policy-muted { border-left-color: var(--text-muted); }
+
+.docker-policy-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 1rem 1.1rem;
+}
+
+.docker-policy-expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.docker-policy-expand:hover {
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+.docker-policy-service {
+  min-width: 0;
+}
+
+.docker-policy-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-bottom: 0.32rem;
+}
+
+.docker-policy-title-row strong {
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+
+.docker-policy-status,
+.docker-rule-state {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.16rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.docker-policy-status.success { color: var(--success); background: var(--success-light); }
+.docker-policy-status.warning { color: var(--warning); background: var(--warning-light); }
+.docker-policy-status.danger { color: var(--danger); background: var(--danger-light); }
+.docker-policy-status.muted { color: var(--text-muted); background: var(--bg-secondary); }
+
+.docker-policy-endpoint {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.docker-policy-detail {
+  margin-top: 0.28rem;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.docker-policy-details {
+  padding: 0 1.1rem 1.1rem 3.95rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.docker-policy-details > .alert {
+  margin-top: 0.9rem;
+  margin-bottom: 0;
+}
+
+.docker-policy-rules-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 0 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.docker-policy-rules {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+}
+
+.docker-policy-rule {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.72rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.docker-policy-rule:last-child { border-bottom: 0; }
+.docker-policy-rule.disabled { opacity: 0.58; }
+
+.docker-policy-rule-source {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.18rem;
+}
+
+.docker-policy-rule-source strong {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+
+.docker-policy-rule-source span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.docker-policy-rule-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.docker-rule-state.enabled { color: var(--success); background: var(--success-light); }
+.docker-rule-state.disabled { color: var(--text-muted); background: var(--bg-secondary); }
+
+.docker-policy-empty {
+  padding: 1rem;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 0.82rem;
+}
+
+.rule-change-preview {
+  margin-top: 1rem;
+}
+
+.rule-change-preview .table-container {
+  max-height: 250px;
+}
+
+.rule-change-preview td:first-child {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.docker-policy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  padding-top: 0.85rem;
+}
+
+@media (max-width: 760px) {
+  .docker-policy-summary {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .docker-policy-summary > .btn {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .docker-policy-details {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .docker-policy-rule {
+    grid-template-columns: 1fr;
+  }
+
+  .docker-policy-rule-meta {
+    justify-content: flex-start;
+  }
+
+  .docker-policy-rule-actions {
+    justify-content: flex-start;
+  }
+}
+
 /* ===== System Chain Card ===== */
 .chain-card {
   border: 1px solid var(--border);

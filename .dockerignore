@@ -3,9 +3,16 @@
 *.md
 docs/
 bin/
+dist/
+.playwright-cli/
+output/
+playwright-report/
+test-results/
+security_best_practices_report.md
 .DS_Store
 *.swp
 *.tmp
+.env.*
 .env
 .env.local
 docker-compose.override.yml

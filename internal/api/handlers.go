@@ -16,6 +16,7 @@ import (
 
 	"crypto/rand"
 
+	"iptables-web/internal/change"
 	"iptables-web/internal/iptables"
 	appLog "iptables-web/internal/logging"
 	"iptables-web/internal/model"
@@ -26,9 +27,15 @@ type Handler struct {
 	store      store.Store
 	executor   *iptables.Executor
 	mutationMu sync.Mutex
+	changeMu   sync.Mutex
 	healthMu   sync.Mutex
 	healthAt   time.Time
 	healthErr  error
+	changes    *change.Manager
+}
+
+func (h *Handler) SetChangeManager(manager *change.Manager) {
+	h.changes = manager
 }
 
 func NewHandler(s store.Store, e *iptables.Executor) *Handler {

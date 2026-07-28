@@ -22,6 +22,10 @@
 | GET | `/system/status` | 内核、后端、托管规则统计 |
 | GET | `/system/chains?backend=packet` | 实时链列表 |
 | GET | `/system/chains/{chain}/rules?backend=packet` | 实时链规则 |
+| GET | `/system/audit?limit=50` | 管理员：最近变更审计 |
+| GET | `/system/audit?download=1` | 管理员：导出完整审计 JSON |
+| GET | `/system/rollback` | 管理员：查询最近规则变更回滚窗口 |
+| POST | `/system/rollback` | 管理员：按回滚 ID 恢复变更前托管规则 |
 | GET | `/docker/mappings` | Docker socket/CLI 确认的发布映射，包含 `family=ipv4|ipv6` |
 | GET | `/docker/diagnostics` | 当前请求来源 IP 与只读 DOCKER-USER 链路检查 |
 | POST | `/docker/whitelist` | 管理员：原子创建来源 ACCEPT 与兜底 DROP |
@@ -96,6 +100,18 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 恢复会先校验并备份当前状态，再以替换语义应用；失败时尝试自动回滚。`backend=all` 导出的组合 JSON 可直接作为请求体上传，并会恢复 IPv4、可用时的 IPv6 以及托管规则元数据。原始 `iptables-save` 文本仍可通过旧式 `{data: string}` 请求恢复，但因为不含托管元数据，恢复后的规则不会自动归属到界面。
+
+## 审计与限时回滚
+
+规则、Docker 白名单、完整恢复、清空托管规则、用户与密码变更都会写入追加式 JSONL 审计。记录包含请求 ID、操作者、来源地址、操作、HTTP 结果以及脱敏后的规则/用户前后差异，不记录密码或会话 Token。
+
+每次成功改变托管规则后会保存变更前快照，并开启 10 分钟回滚窗口：
+
+```json
+{"id":"<GET /system/rollback 返回的 id>"}
+```
+
+回滚只恢复本程序托管规则，不恢复未知外部规则；成功回滚后，回滚前状态会成为新的反向回滚点。
 
 ## 规则助手
 

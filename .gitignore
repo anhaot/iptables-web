@@ -1,18 +1,49 @@
-bin/
+# Build and release artifacts
+/bin/
+/dist/
+/iptables-web
 *.exe
 *.dll
 *.so
 *.dylib
-.DS_Store
-*.swp
-*.tmp
-.env
-.env.local
-/data/
-.playwright-cli/
-output/
+*.test
+*.out
+coverage.*
 
-# Keep only the current signed-off release archive in source control.
-dist/*
-!dist/iptables-web-20260720.13-linux-amd64.tar.gz
-!dist/iptables-web-20260720.13-linux-amd64.tar.gz.sha256
+# Runtime data (may contain credentials, rules, or audit history)
+/data/
+/rules.json*
+/users.json*
+/audit.jsonl*
+/rollback.json*
+*.pid
+*.log
+
+# Local configuration
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+
+# Test and browser artifacts
+/.playwright-cli/
+/output/
+/playwright-report/
+/test-results/
+
+# Local review reports
+/security_best_practices_report.md
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+*.bak

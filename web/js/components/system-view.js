@@ -11,11 +11,22 @@ const SystemView = {
   editingUser: null,
   showUserModal: false,
   showPasswordModal: false,
+  auditEvents: [],
+  rollback: { available: false },
+  rollbackConfirm: false,
 
   async refresh() {
     this.loading = true;
     this.render();
-    try { this.users = await api.listUsers(); } catch (e) {}
+    var role = sessionStorage.getItem('auth_role') || '';
+    var requests = [api.listUsers()];
+    if (role === 'admin' || !getAuthToken()) {
+      requests.push(api.listAuditEvents(20), api.getRollbackStatus());
+    }
+    var results = await Promise.allSettled(requests);
+    if (results[0].status === 'fulfilled') this.users = results[0].value;
+    if (results[1] && results[1].status === 'fulfilled') this.auditEvents = results[1].value;
+    if (results[2] && results[2].status === 'fulfilled') this.rollback = results[2].value;
     this.loading = false;
     this.render();
   },
@@ -135,6 +146,44 @@ const SystemView = {
       this.render();
     } catch (e) {
       Toasts.error('清空失败：' + e.message);
+    }
+  },
+
+  async downloadAudit() {
+    try {
+      var audit = await api.downloadAudit();
+      var url = URL.createObjectURL(audit.blob);
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = audit.filename || ('iptables-web-audit-' + new Date().toISOString().slice(0, 10) + '.json');
+      link.click();
+      URL.revokeObjectURL(url);
+      Toasts.success('审计日志已导出');
+    } catch (e) {
+      Toasts.error(e.message || '审计日志导出失败');
+    }
+  },
+
+  async rollbackLastChange() {
+    if (!this.rollback || !this.rollback.available) {
+      Toasts.warning('当前没有可用的回滚窗口');
+      return;
+    }
+    if (!this.rollbackConfirm) {
+      this.rollbackConfirm = true;
+      this.render();
+      return;
+    }
+    try {
+      var result = await api.rollbackLastChange(this.rollback.id);
+      this.rollbackConfirm = false;
+      Toasts.success('已回滚 ' + Number(result.restored_rules || 0) + ' 条托管规则');
+      await AppState.refreshSystemInfo();
+      await this.refresh();
+    } catch (e) {
+      this.rollbackConfirm = false;
+      Toasts.error('回滚失败：' + e.message);
+      await this.refresh();
     }
   },
 
@@ -291,6 +340,17 @@ const SystemView = {
           '<p style="font-size:0.85rem;color:var(--text-secondary);line-height:1.6">精确删除通过本界面写入的运行态规则并清空托管记录。不会 flush 整条链，也不会删除 Docker、firewalld 或其他工具创建的外部规则。建议卸载前先执行。</p>' +
           '<button class="btn btn-danger" onclick="SystemView.clearManagedRules()">清空界面配置的规则</button>' +
         '</div>' +
+        '<div class="card">' +
+          '<div class="card-header"><h3>↩ 最近变更回滚</h3></div>' +
+          renderRollbackStatus(this.rollback, this.rollbackConfirm) +
+          '<button class="btn ' + (this.rollbackConfirm ? 'btn-danger' : 'btn-secondary') + '" onclick="SystemView.rollbackLastChange()" ' + (!(this.rollback && this.rollback.available) ? 'disabled' : '') + '>' +
+            (this.rollbackConfirm ? '确认回滚最近变更' : '回滚最近变更') + '</button>' +
+        '</div>' +
+      '</div>';
+
+      html += '<div class="card" style="margin-top:1.25rem">' +
+        '<div class="card-header"><h3>🧾 管理员变更审计</h3><button class="btn btn-sm btn-secondary" onclick="SystemView.downloadAudit()">导出完整审计</button></div>' +
+        renderAuditEvents(this.auditEvents) +
       '</div>';
     } else {
       html += '<div class="alert alert-info">当前账号为只读权限，备份和恢复完整防火墙规则集需要管理员权限。</div>';
@@ -357,6 +417,46 @@ const SystemView = {
     root.innerHTML = html;
   }
 };
+
+function renderRollbackStatus(rollback, confirming) {
+  if (!rollback || !rollback.available) {
+    return '<p style="font-size:0.85rem;color:var(--text-muted);line-height:1.6">当前没有可回滚的规则变更。每次成功修改规则后会开启 10 分钟窗口。</p>';
+  }
+  var expires = formatDate(rollback.expires_at);
+  var html = '<p style="font-size:0.85rem;color:var(--text-secondary);line-height:1.6">可回滚操作：<strong>' +
+    escapeHtml(auditActionLabel(rollback.action)) + '</strong><br>操作者：' + escapeHtml(rollback.actor || '—') +
+    ' · 目标规则数：' + Number(rollback.rule_count || 0) + '<br>有效期至：' + escapeHtml(expires) + '</p>';
+  if (confirming) {
+    html += '<div class="alert alert-warning"><strong>请再次确认：</strong>将恢复变更前的全部托管规则；当前状态会成为新的反向回滚点。</div>';
+  }
+  return html;
+}
+
+function renderAuditEvents(events) {
+  if (!events || events.length === 0) {
+    return '<div style="padding:1.5rem;text-align:center;color:var(--text-muted)">暂无管理员变更记录</div>';
+  }
+  var rows = events.map(function(event) {
+    var changed = Number((event.rule_changes || []).length) + Number((event.user_changes || []).length);
+    return '<tr><td>' + escapeHtml(formatDate(event.created_at)) + '</td>' +
+      '<td><strong>' + escapeHtml(event.actor || 'anonymous') + '</strong><br><small>' + escapeHtml(event.remote_ip || '—') + '</small></td>' +
+      '<td>' + escapeHtml(auditActionLabel(event.action)) + '</td>' +
+      '<td>' + changed + '</td>' +
+      '<td><span class="badge ' + (event.status < 400 ? 'badge-accept' : 'badge-drop') + '">' + Number(event.status || 0) + '</span></td></tr>';
+  }).join('');
+  return '<div class="table-container"><table><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>变化数</th><th>结果</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+function auditActionLabel(action) {
+  var labels = {
+    create_rule: '创建规则', update_rule: '更新规则', delete_rule: '删除规则',
+    toggle_rule: '启停规则', reorder_rules: '调整规则顺序',
+    create_docker_whitelist: '创建 Docker 白名单', restore_firewall: '恢复防火墙',
+    clear_managed_rules: '清空托管规则', rollback_change: '回滚最近变更',
+    change_password: '修改密码', manage_user: '管理用户',
+  };
+  return labels[action] || action || '未知操作';
+}
 
 function modalOverlay(body, onClose) {
   return '<div style="position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;padding:1rem">' +

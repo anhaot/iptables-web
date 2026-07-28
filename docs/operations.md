@@ -72,6 +72,24 @@ ctorigdstport 18080 ctdir ORIGINAL
 
 选择具体链、清空搜索条件后，至少两条规则时可以直接拖动排序。调整先形成草稿，点击“保存顺序”才同步。程序阻止将宽范围 DROP/REJECT 排到匹配白名单 ACCEPT 前面。
 
+创建或编辑规则时，第一次点击只会显示字段级变更预览；确认后才写入运行防火墙。
+
+## 管理员审计与最近变更回滚
+
+系统管理页显示最近管理员变更，并可导出完整 JSON 审计。默认文件：
+
+```text
+/var/lib/iptables-web/audit.jsonl
+```
+
+每次成功改变托管规则后会保留 10 分钟回滚窗口。系统管理页需要二次确认才会回滚；回滚成功后，原状态成为新的反向回滚点。默认快照：
+
+```text
+/var/lib/iptables-web/rollback.json
+```
+
+限时回滚只覆盖本程序托管规则，不替代完整 packet 备份，也不能恢复 Docker、firewalld 或其他工具的外部规则。
+
 ## 备份
 
 系统页“下载全部备份”会生成组合 JSON，其中包含 `packet.rules` 和 `managed-rules.json`。恢复时在系统页选择该 JSON 文件，不需要打开或复制文件内容。命令行也可备份：

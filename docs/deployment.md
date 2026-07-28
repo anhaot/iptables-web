@@ -62,6 +62,8 @@ Type=simple
 ExecStart=/usr/local/bin/iptables-web
 Environment=RULES_FILE=/var/lib/iptables-web/rules.json
 Environment=USERS_FILE=/var/lib/iptables-web/users.json
+Environment=AUDIT_FILE=/var/lib/iptables-web/audit.jsonl
+Environment=ROLLBACK_FILE=/var/lib/iptables-web/rollback.json
 Environment=LISTEN_ADDR=0.0.0.0:33801
 Environment=LOG_LEVEL=info
 Environment=AUTH_ENABLED=true

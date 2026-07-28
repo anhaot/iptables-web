@@ -42,7 +42,7 @@ func TestShouldRateLimitAPI(t *testing.T) {
 func TestAuthPublicPathsAllowFrontendShell(t *testing.T) {
 	t.Parallel()
 
-	for _, path := range []string{"/", "/index.html", "/login.html", "/css/base.css", "/js/app.js", "/api/v1/health", "/api/v1/auth/login", "/api/v1/auth/captcha"} {
+	for _, path := range []string{"/", "/index.html", "/login.html", "/favicon.ico", "/favicon.svg", "/css/base.css", "/js/app.js", "/api/v1/health", "/api/v1/auth/login", "/api/v1/auth/captcha"} {
 		if !isPublicPath(path) {
 			t.Fatalf("isPublicPath(%q) = false, want true", path)
 		}

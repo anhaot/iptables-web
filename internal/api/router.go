@@ -17,6 +17,7 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 	webFS, _ = fs.Sub(webFS, "web")
 
 	var handler http.Handler = mux
+	handler = changeAuditMiddleware(h, userStore)(handler)
 	handler = recoveryMiddleware(handler)
 	handler = rateLimitMiddleware(600, time.Minute)(handler)
 	handler = loggingMiddleware(handler)
@@ -153,6 +154,23 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 		}
 		adminOnly(http.HandlerFunc(h.ClearManagedRules)).ServeHTTP(w, r)
 	})
+	mux.HandleFunc("/api/v1/system/audit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
+			return
+		}
+		adminOnly(http.HandlerFunc(h.GetAuditEvents)).ServeHTTP(w, r)
+	})
+	mux.HandleFunc("/api/v1/system/rollback", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			adminOnly(http.HandlerFunc(h.GetRollbackStatus)).ServeHTTP(w, r)
+		case http.MethodPost:
+			adminOnly(http.HandlerFunc(h.RollbackLastChange)).ServeHTTP(w, r)
+		default:
+			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET or POST")
+		}
+	})
 	// Rule assistant
 	mux.HandleFunc("/api/v1/assistant/scenarios", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -219,6 +237,10 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write(indexData)
+			return
+		}
+		if path == "/favicon.ico" {
+			http.Redirect(w, r, "/favicon.svg", http.StatusTemporaryRedirect)
 			return
 		}
 		fsPath := path[1:]
