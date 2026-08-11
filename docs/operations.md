@@ -16,6 +16,92 @@ sudo iptables -nvL DOCKER-USER --line-numbers
 
 这些命令不会修改防火墙。
 
+Agent 主机使用对应服务名和端口：
+
+```bash
+sudo systemctl status iptables-web-agent --no-pager
+sudo journalctl -u iptables-web-agent -n 100 --no-pager
+curl --fail http://127.0.0.1:33802/api/v1/health
+```
+
+## systemd 启动或升级失败
+
+安装脚本不会退回为后台直接运行。若新版本 unit、启动或健康检查失败，会恢复安装前的二进制、unit、EnvironmentFile，以及原有 enable/active 状态。按以下顺序收集信息：
+
+```bash
+sudo systemctl status iptables-web --no-pager -l
+sudo journalctl -u iptables-web -b -n 200 --no-pager
+sudo systemctl cat iptables-web
+sudo systemctl show iptables-web -p LoadState -p ActiveState -p SubState -p ExecMainStatus
+sudo systemd-analyze verify /etc/systemd/system/iptables-web.service
+sudo stat -c '%a %U:%G %n' /etc/iptables-web/iptables-web.env /var/lib/iptables-web
+sudo /usr/local/bin/iptables-web --version
+```
+
+Agent 把名称替换成 `iptables-web-agent`，配置文件替换成 `/etc/iptables-web-agent/agent.env`。常见原因：
+
+- EnvironmentFile 路径或数据目录写错；
+- 数据目录不是 root 私有，或 `ProtectSystem=strict` 下未列入 `ReadWritePaths`；
+- 端口已被占用；
+- 指定的 iptables 后端不存在；
+- Agent 私有 CA 文件移动、权限错误或中心 URL 不可达；
+- 旧规则数据无法在当前运行后端恢复并核验。
+
+只修改 EnvironmentFile 后必须重启进程：
+
+```bash
+sudo systemctl restart iptables-web
+curl --fail http://127.0.0.1:33801/api/v1/health
+```
+
+新增主机、批准 Agent、修改主机 HTTPS/CA、创建或撤销动态访问密钥不需要重启。
+
+Agent 安装器管理的中心 CA 固定为 `/etc/iptables-web-agent/manager-ca.pem`。若 Agent 心跳报证书错误，检查该文件权限、`agent.env` 的 `MANAGER_CA_FILE` 以及中心证书是否包含 `MANAGER_URL` 使用的内网 IP。
+
+Agent 申请始终以中心看到的 TCP 来源 IP 为准，不读取代理转发头。若待确认项显示反向代理地址，说明 `MANAGER_URL` 配错；把它改为中心内网直连 IP，而不是浏览器使用的代理域名。
+
+### Agent 未出现在待确认列表
+
+待确认申请只依赖 Agent 主动访问中心 `33801`；中心访问 Agent `33802` 是点击“确认”时的下一阶段。因此关闭防火墙并不能替代对进程、监听地址、路由、版本和时间的逐层检查，也不应通过 flush 规则排障。
+
+先在 Agent 主机检查进程、本地健康、非敏感连接配置和本次启动日志：
+
+```bash
+sudo systemctl status iptables-web-agent --no-pager
+curl -i http://127.0.0.1:33802/api/v1/health
+sudo grep -E '^(MANAGER_URL|AGENT_PUBLIC_URL|AGENT_LISTEN_ADDR)=' /etc/iptables-web-agent/agent.env
+sudo journalctl -u iptables-web-agent -b --no-pager | grep -E 'enrollment|registration|rejected|failed|authentication|listening'
+timedatectl status
+```
+
+不要收集或发送完整 EnvironmentFile、`agent.identity` 或 `agent.key.sha256`。日志状态的含义：
+
+- `pending`：中心已经接收申请，继续检查管理员页面和待确认列表 API；
+- `approved`：该身份已纳管，应到“纳管概览”查找，而不是待确认列表；
+- `rejected`：管理员拒绝后该身份隐藏 24 小时；
+- `connection refused`：中心未在目标地址监听，或端口填错；
+- `i/o timeout`：检查路由、ACL、安全组和实际目标地址；
+- `clock differs ... more than 5m`：同步 Agent 与中心时间；
+- `invalid controller response`、HTTP 404 或 HTML：通常访问了旧版中心、错误端口或普通反向代理。
+
+再从 Agent 主机直连中心内网 IP。空申请预期得到 HTTP 400 与 `invalid_enrollment`，这证明当前中心存在正确的公开注册路由：
+
+```bash
+curl -i --connect-timeout 5 http://中心内网IP:33801/api/v1/health
+curl -i --connect-timeout 5 -X POST -H 'Content-Type: application/json' -d '{}' \
+  http://中心内网IP:33801/api/v1/agent-enrollments/register
+```
+
+最后在中心检查监听和是否收到注册请求；容器部署把 `journalctl` 换成对应容器日志：
+
+```bash
+sudo ss -lntp | grep ':33801'
+sudo systemctl status iptables-web --no-pager
+sudo journalctl -u iptables-web -b --no-pager | grep 'agent-enrollments/register'
+```
+
+中心应监听 `0.0.0.0:33801` 或实际内网 IP，而不是只监听 `127.0.0.1:33801`。两端时间差必须小于 5 分钟，待确认列表仅管理员可见。
+
 ## 安装后无法远端访问
 
 按顺序确认：
@@ -78,11 +164,13 @@ ctorigdstport 18080 ctdir ORIGINAL
 
 ## 审计、回滚、备份与恢复
 
-系统管理页显示最近管理员变更，并可导出完整 JSON 审计。默认文件：
+中心本机审计包含用户、主机、Agent 审批和密钥管理信息，因此仅管理员可查看并导出完整 JSON；普通用户仍可查看其授权远程 Agent 自己的防火墙审计。默认文件：
 
 ```text
 /var/lib/iptables-web/audit.jsonl
 ```
+
+中心代理远程变更时会在 Agent Key 认证成功后传递已认证的用户名、角色、原始来源 IP 和请求 ID；浏览器 Bearer Token 不会发送给 Agent。新版 Agent 因此会把远程授权操作记录为实际用户名，而不是笼统的 `api-key`。旧版 Agent 或历史记录仍可能显示 `api-key`。页面“查看详情”展示方法、路径、请求 ID，以及规则、用户、主机、访问密钥元数据或安全策略的脱敏前后差异；导出 JSON 保留同样的信息。
 
 每次成功改变托管规则后会保留 10 分钟回滚窗口。系统管理页需要二次确认才会回滚；回滚成功后，原状态成为新的反向回滚点。默认快照：
 
@@ -101,6 +189,14 @@ sudo iptables-save > /root/iptables-backup-$(date +%F-%H%M%S).rules
 sudo nft list ruleset > /root/nft-backup-$(date +%F-%H%M%S).nft
 sudo cp -a /var/lib/iptables-web /root/iptables-web-data-backup
 ```
+
+中心多主机恢复时，`hosts.json` 与 `hosts.key` 必须来自同一次备份，否则加密凭据无法解密。Agent 应同时备份 `/var/lib/iptables-web-agent` 和 `/etc/iptables-web-agent`；不要只恢复 identity 或只恢复 key hash。
+
+如果中心改用外部 `HOST_CREDENTIAL_KEY`，必须在恢复时提供完全相同的值；安装器升级会自动保留已有 EnvironmentFile 中的值。该变量是中心加密 `hosts.json` 内 Agent 凭据的主密钥，不是需要人工分发给 Agent 的访问密钥。
+
+## 管理员账户解锁
+
+“管理员锁定”模式下，任一仍可登录的管理员可在“用户与权限”页直接解锁账户，原密码不变。系统不会永久锁定最后一个仍可登录的管理员，而会改用配置的定时锁定，以保留恢复入口。若数据来自旧版本且所有管理员已经永久锁定，可使用预先创建的中心 API 访问密钥调用 `POST /api/v1/users/{id}/unlock`；没有可用会话或密钥时，应先备份 `users.json`，再通过受控的离线恢复流程处理，不能删除整个用户文件。
 
 选择与你实际后端匹配的命令。
 
@@ -179,3 +275,15 @@ sudo ip6tables-restore < /root/ip6tables-before-flush.rules
 ```
 
 firewalld/Docker 重启也可能重新生成规则，但不能把它当成可靠回滚方案。
+
+## 容器运行检查
+
+```bash
+docker compose ps
+docker compose logs --tail=200 iptables-web
+docker inspect iptables-web --format '{{json .State.Health}}'
+docker inspect iptables-web --format '{{.HostConfig.NetworkMode}} {{json .HostConfig.CapAdd}}'
+docker stats --no-stream iptables-web
+```
+
+NetworkMode 应为 `host`，能力应包含 `NET_ADMIN`、`NET_RAW`。默认 Compose 限制为 1 CPU、512 MiB 内存。容器健康但规则没有作用到宿主机时，优先检查是否误用了非 host network；不要用 flush 验证。

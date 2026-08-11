@@ -93,7 +93,12 @@ func (h *Handler) CreateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rule.ID = newID()
+	ruleID, err := newID()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "random_source_failed", "unable to generate a secure rule ID")
+		return
+	}
+	rule.ID = ruleID
 	rule.Backend = model.NormalizeBackend(rule.Backend)
 	rule.CreatedAt = time.Now()
 	rule.UpdatedAt = time.Now()
@@ -822,8 +827,13 @@ func (h *Handler) CreateDockerWhitelist(w http.ResponseWriter, r *http.Request) 
 		proto = "tcp"
 	}
 	port := fmt.Sprintf("%d", req.HostPort)
+	allowID, err := newID()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "random_source_failed", "unable to generate a secure rule ID")
+		return
+	}
 	allowRule := &model.Rule{
-		ID: newID(), Backend: model.BackendPacket, Chain: "DOCKER_USER", Action: "ACCEPT",
+		ID: allowID, Backend: model.BackendPacket, Chain: "DOCKER_USER", Action: "ACCEPT",
 		Protocol: proto, Source: req.Source, OriginalDPort: port, Enabled: true, Position: 1,
 	}
 	hostIP := strings.Trim(strings.TrimSpace(req.HostIP), "[]")
@@ -892,8 +902,14 @@ func (h *Handler) CreateDockerWhitelist(w http.ResponseWriter, r *http.Request) 
 	createdDrop := false
 	var dropRule *model.Rule
 	if existingDrop == nil {
+		dropID, err := newID()
+		if err != nil {
+			h.restoreRulesSnapshot(snapshot)
+			respondError(w, http.StatusInternalServerError, "random_source_failed", "unable to generate a secure rule ID")
+			return
+		}
 		dropRule = &model.Rule{
-			ID: newID(), Backend: model.BackendPacket, Chain: "DOCKER_USER", Action: "DROP",
+			ID: dropID, Backend: model.BackendPacket, Chain: "DOCKER_USER", Action: "DROP",
 			Protocol: proto, OriginalDest: allowRule.OriginalDest, OriginalDPort: port, Enabled: true, Position: maxPosition + 2,
 			Desc: "阻止其他来源访问 " + endpoint,
 		}
@@ -1258,10 +1274,12 @@ func dropBlocksAccept(dropRule, acceptRule *model.Rule) bool {
 	return true
 }
 
-func newID() string {
+func newID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
 }
 
 func (h *Handler) snapshotRules() []*model.Rule {

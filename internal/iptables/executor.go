@@ -70,6 +70,24 @@ func (e *Executor) DeleteRules(rules []*model.Rule) error {
 	return errors.Join(deleteErrors...)
 }
 
+// DeleteOwnedRules removes only the comment-tagged rules created by this
+// application. Unlike DeleteRules, it deliberately has no legacy untagged
+// fallback and is therefore suitable for the independently installed Agent.
+func (e *Executor) DeleteOwnedRules(rules []*model.Rule) error {
+	var deleteErrors []error
+	for _, rule := range rules {
+		backend, err := e.backendForRule(rule)
+		if err == nil {
+			err = backend.DeleteRule(rule)
+		}
+		if err != nil {
+			deleteErrors = append(deleteErrors, fmt.Errorf("delete Agent-owned rule %s (%s/%s): %w",
+				rule.ID, model.NormalizeBackend(rule.Backend), rule.Chain, err))
+		}
+	}
+	return errors.Join(deleteErrors...)
+}
+
 // MigrateLegacyRules removes unowned rules represented by the persisted store
 // before SyncRules recreates them with ownership comments. It is intentionally
 // run only during startup migration, never for newly submitted rules.

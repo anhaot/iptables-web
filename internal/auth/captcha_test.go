@@ -5,10 +5,13 @@ import (
 	"testing"
 )
 
-func TestGenerateCaptchaQuestionUsesLetters(t *testing.T) {
+func TestGenerateCaptchaQuestionUsesMixedCharacterClasses(t *testing.T) {
 	t.Parallel()
 
-	captcha := GenerateCaptchaQuestion()
+	captcha, err := GenerateCaptchaQuestion()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(captcha.Answer) != 5 {
 		t.Fatalf("Answer length = %d, want 5", len(captcha.Answer))
 	}
@@ -19,5 +22,10 @@ func TestGenerateCaptchaQuestionUsesLetters(t *testing.T) {
 		if !strings.ContainsRune(captchaAlphabet, ch) {
 			t.Fatalf("Answer contains unexpected rune %q", ch)
 		}
+	}
+	if !strings.ContainsAny(captcha.Answer, captchaUppercase) ||
+		!strings.ContainsAny(captcha.Answer, captchaLowercase) ||
+		!strings.ContainsAny(captcha.Answer, captchaDigits) {
+		t.Fatalf("Answer %q does not contain uppercase, lowercase, and digit classes", captcha.Answer)
 	}
 }

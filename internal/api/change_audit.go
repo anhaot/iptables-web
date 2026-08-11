@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"iptables-web/internal/change"
 	appLog "iptables-web/internal/logging"
+	"iptables-web/internal/model"
 	"iptables-web/internal/store"
 )
 
@@ -36,39 +38,93 @@ func (w *auditResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-func changeAuditMiddleware(h *Handler, users *store.UserStore) func(http.Handler) http.Handler {
+func changeAuditMiddleware(h *Handler, users *store.UserStore, hosts *store.HostStore, accessKeys *store.APIKeyStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if h.changes == nil || !isMutationRequest(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
-			h.changeMu.Lock()
-			defer h.changeMu.Unlock()
-			beforeRules, _ := h.store.All()
-			beforeUsers := users.List()
+			trackLocalSnapshot := mutationChangesLocalSnapshot(r)
+			trackHostSnapshot := mutationChangesHostSnapshot(r)
+			trackAccessKeySnapshot := strings.HasPrefix(r.URL.Path, "/api/v1/access-keys")
+			trackPolicySnapshot := r.URL.Path == "/api/v1/security-policy"
+			trackSnapshot := trackLocalSnapshot || trackHostSnapshot || trackAccessKeySnapshot || trackPolicySnapshot
+			if trackSnapshot {
+				h.changeMu.Lock()
+				defer h.changeMu.Unlock()
+			}
+			var beforeRules []*model.Rule
+			var beforeUsers []model.UserResponse
+			var beforeHosts []model.ManagedHostResponse
+			var beforeAccessKeys []model.AccessKeyResponse
+			var beforePolicy *model.AdminSecurityPolicy
+			if trackLocalSnapshot {
+				beforeRules, _ = h.store.All()
+				if users != nil {
+					beforeUsers = users.List()
+				}
+			}
+			if trackHostSnapshot && hosts != nil {
+				beforeHosts = hosts.List()
+			}
+			if trackAccessKeySnapshot && accessKeys != nil {
+				beforeAccessKeys = accessKeys.List()
+			}
+			if trackPolicySnapshot && users != nil {
+				policy := users.AdminSecurityPolicy()
+				beforePolicy = &policy
+			}
 			recorder := &auditResponseWriter{ResponseWriter: w}
 			next.ServeHTTP(recorder, r)
 			if recorder.status == 0 {
 				recorder.status = http.StatusOK
 			}
-			afterRules, _ := h.store.All()
-			afterUsers := users.List()
-			ruleChanges := change.DiffRules(beforeRules, afterRules)
-			userChanges := change.DiffUsers(beforeUsers, afterUsers)
+			var ruleChanges []change.RuleChange
+			var userChanges []change.UserChange
+			if trackLocalSnapshot {
+				afterRules, _ := h.store.All()
+				var afterUsers []model.UserResponse
+				if users != nil {
+					afterUsers = users.List()
+				}
+				ruleChanges = change.DiffRules(beforeRules, afterRules)
+				userChanges = change.DiffUsers(beforeUsers, afterUsers)
+			}
+			var hostChanges []change.HostChange
+			var accessKeyChanges []change.AccessKeyChange
+			var afterPolicy *model.AdminSecurityPolicy
+			if trackHostSnapshot && hosts != nil {
+				hostChanges = change.DiffHosts(beforeHosts, hosts.List())
+			}
+			if trackAccessKeySnapshot && accessKeys != nil {
+				accessKeyChanges = change.DiffAccessKeys(beforeAccessKeys, accessKeys.List())
+			}
+			if trackPolicySnapshot && users != nil {
+				policy := users.AdminSecurityPolicy()
+				if beforePolicy == nil || !reflect.DeepEqual(*beforePolicy, policy) {
+					afterPolicy = &policy
+				} else {
+					beforePolicy = nil
+				}
+			}
 			actor, role := auditActor(r)
 			event := change.AuditEvent{
-				CreatedAt:   time.Now(),
-				RequestID:   requestIDFromContext(r),
-				Actor:       actor,
-				Role:        role,
-				RemoteIP:    remoteRequestIP(r.RemoteAddr),
-				Method:      r.Method,
-				Path:        r.URL.Path,
-				Action:      auditAction(r),
-				Status:      recorder.status,
-				RuleChanges: ruleChanges,
-				UserChanges: userChanges,
+				CreatedAt:            time.Now(),
+				RequestID:            requestIDFromContext(r),
+				Actor:                actor,
+				Role:                 role,
+				RemoteIP:             auditRemoteIP(r),
+				Method:               r.Method,
+				Path:                 r.URL.Path,
+				Action:               auditAction(r),
+				Status:               recorder.status,
+				RuleChanges:          ruleChanges,
+				UserChanges:          userChanges,
+				HostChanges:          hostChanges,
+				AccessKeyChanges:     accessKeyChanges,
+				SecurityPolicyBefore: beforePolicy,
+				SecurityPolicyAfter:  afterPolicy,
 			}
 			if err := h.changes.Record(event); err != nil {
 				appLog.Errorf("write change audit: %v", err)
@@ -82,13 +138,40 @@ func changeAuditMiddleware(h *Handler, users *store.UserStore) func(http.Handler
 	}
 }
 
+func mutationChangesHostSnapshot(r *http.Request) bool {
+	if r.URL.Path == "/api/v1/agent-enrollments/approve" {
+		return true
+	}
+	if !strings.HasPrefix(r.URL.Path, "/api/v1/hosts/") || strings.Contains(r.URL.Path, "/api/") || r.URL.Path == "/api/v1/hosts/batch/rules" {
+		return false
+	}
+	return r.Method == http.MethodPut || r.Method == http.MethodDelete
+}
+
+func mutationChangesLocalSnapshot(r *http.Request) bool {
+	path := r.URL.Path
+	return strings.HasPrefix(path, "/api/v1/rules") ||
+		strings.HasPrefix(path, "/api/v1/users") ||
+		path == "/api/v1/security-policy" ||
+		path == "/api/v1/auth/password" ||
+		path == "/api/v1/docker/whitelist" ||
+		path == "/api/v1/system/restore" ||
+		path == "/api/v1/system/managed-rules" ||
+		path == "/api/v1/system/rollback"
+}
+
 func isMutationRequest(r *http.Request) bool {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodDelete {
 		return false
 	}
 	path := r.URL.Path
 	return strings.HasPrefix(path, "/api/v1/rules") ||
+		strings.HasPrefix(path, "/api/v1/hosts") ||
+		path == "/api/v1/agent-enrollments/approve" ||
+		path == "/api/v1/agent-enrollments/reject" ||
+		strings.HasPrefix(path, "/api/v1/access-keys") ||
 		strings.HasPrefix(path, "/api/v1/users") ||
+		path == "/api/v1/security-policy" ||
 		path == "/api/v1/auth/password" ||
 		path == "/api/v1/docker/whitelist" ||
 		path == "/api/v1/system/restore" ||
@@ -105,6 +188,9 @@ func isRollbackEligible(path string) bool {
 }
 
 func auditActor(r *http.Request) (string, string) {
+	if identity, ok := r.Context().Value(forwardedAuditIdentityKey).(*forwardedAuditIdentity); ok && identity != nil {
+		return identity.Actor, identity.Role
+	}
 	if sess, ok := r.Context().Value(sessionKey).(*store.Session); ok {
 		return sess.Username, sess.Role
 	}
@@ -117,6 +203,13 @@ func auditActor(r *http.Request) (string, string) {
 	return "anonymous", ""
 }
 
+func auditRemoteIP(r *http.Request) string {
+	if identity, ok := r.Context().Value(forwardedAuditIdentityKey).(*forwardedAuditIdentity); ok && identity != nil {
+		return identity.RemoteIP
+	}
+	return remoteRequestIP(r.RemoteAddr)
+}
+
 func requestIDFromContext(r *http.Request) string {
 	id, _ := r.Context().Value(requestIDKey).(string)
 	return id
@@ -125,6 +218,12 @@ func requestIDFromContext(r *http.Request) string {
 func auditAction(r *http.Request) string {
 	path := r.URL.Path
 	switch {
+	case strings.HasPrefix(path, "/api/v1/agent-enrollments/approve"):
+		return "approve_agent_enrollment"
+	case strings.HasPrefix(path, "/api/v1/agent-enrollments/reject"):
+		return "reject_agent_enrollment"
+	case strings.HasPrefix(path, "/api/v1/access-keys"):
+		return "manage_access_key"
 	case path == "/api/v1/rules" && r.Method == http.MethodPost:
 		return "create_rule"
 	case path == "/api/v1/rules/reorder":
@@ -147,6 +246,10 @@ func auditAction(r *http.Request) string {
 		return "change_password"
 	case strings.HasPrefix(path, "/api/v1/users"):
 		return "manage_user"
+	case path == "/api/v1/security-policy":
+		return "update_security_policy"
+	case strings.HasPrefix(path, "/api/v1/hosts"):
+		return "manage_remote_host"
 	default:
 		return strings.ToLower(r.Method) + " " + path
 	}

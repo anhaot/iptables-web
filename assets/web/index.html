@@ -18,27 +18,25 @@
         <div class="logo">🛡</div>
         <div>
           <h2>iptables-web</h2>
-          <span>防火墙可视化管理</span>
+          <span>集中防火墙管理中心</span>
         </div>
       </div>
       <nav class="sidebar-nav">
-        <a data-page="dashboard" onclick="AppState.navigate('dashboard')" class="active">
-          <span class="icon">📊</span> 仪表盘
+        <a href="#fleet" data-page="fleet" onclick="AppState.closeHost('fleet');return false" class="active" aria-current="page">
+          <span class="icon">▦</span> 纳管概览 <span id="fleet-health-count" class="sidebar-health-count" hidden>0</span>
         </a>
-        <a data-page="rules" onclick="AppState.navigate('rules')">
-          <span class="icon">📋</span> 规则管理
-        </a>
-        <a data-page="chains" onclick="AppState.navigate('chains')">
-          <span class="icon">🔗</span> 链浏览器
-        </a>
-        <a data-page="docker" onclick="AppState.navigate('docker')">
-          <span class="icon">🐳</span> Docker 端口
-        </a>
-        <a data-page="assistant" onclick="AppState.navigate('assistant')">
-          <span class="icon">💡</span> 规则助手
-        </a>
-        <a data-page="system" onclick="AppState.navigate('system')">
-          <span class="icon">⚙</span> 系统管理
+		<a href="#assistant" data-page="assistant" onclick="AppState.closeHost('assistant');return false">
+		  <span class="icon">💡</span> 规则助手
+		</a>
+		<a id="local-firewall-nav" href="#dashboard" data-page="local" onclick="AppState.openLocal('dashboard');return false" hidden>
+		  <span class="icon"><img src="/favicon.svg" alt=""></span> 本机防火墙
+		</a>
+		<div class="sidebar-section-label" data-admin-only hidden>管理</div>
+		<a href="#hosts" data-page="hosts" data-admin-only onclick="AppState.navigate('hosts');return false" hidden>
+		  <span class="icon">🖥</span> Agent 纳管
+		</a>
+        <a href="#users" data-page="users" data-admin-only onclick="AppState.navigate('users');return false" hidden>
+          <span class="icon">👥</span> 用户与权限
         </a>
       </nav>
       <div class="sidebar-footer">
@@ -56,7 +54,10 @@
           </select>
         </div>
         <div style="display:flex;gap:0.5rem;justify-content:center">
-          <button class="theme-toggle-btn" onclick="AppState.logout()" title="退出登录" style="font-size:0.8rem">
+          <button class="theme-toggle-btn" data-auth-required onclick="window.location.href='/change-password.html'" title="修改当前登录密码" style="font-size:0.8rem">
+            🔑 修改密码
+          </button>
+          <button class="theme-toggle-btn" data-auth-required onclick="AppState.logout()" title="退出登录" style="font-size:0.8rem">
             🚪 退出
           </button>
         </div>
@@ -65,11 +66,21 @@
 
     <!-- ===== 主内容区 ===== -->
     <main class="main-content">
+      <div id="host-context-bar" class="host-context-bar host-detail-header" aria-live="polite" hidden></div>
+
+      <!-- 纳管概览 -->
+      <section class="page-section active" data-page="fleet">
+        <div class="page-header">
+          <div><h1>纳管概览</h1><p class="page-subtitle">统一查看你有权管理的主机，并打开对应主机配置。</p></div>
+        </div>
+        <div id="fleet-content"><div class="loading-spinner"><div class="spinner"></div> 加载主机...</div></div>
+      </section>
+
       <!-- 仪表盘 -->
-      <section class="page-section active" data-page="dashboard">
+      <section class="page-section" data-page="dashboard">
         <div class="page-header">
           <h1>📊 仪表盘</h1>
-          <button class="btn btn-secondary" onclick="AppState.refreshSystemInfo();DockerPorts.refresh()">↻ 刷新</button>
+          <button class="btn btn-secondary" onclick="updateDashboard()">↻ 刷新</button>
         </div>
         <div class="card-grid" id="dashboard-stats">
           <div class="stat-card">
@@ -105,7 +116,7 @@
         <div class="card" style="margin-top:1rem">
           <div class="card-header">
             <h3>🐳 Docker 端口映射</h3>
-            <button class="btn btn-sm btn-secondary" onclick="DockerPorts.refresh()">扫描端口</button>
+            <button class="btn btn-sm btn-secondary" onclick="updateDashboard()">扫描端口</button>
           </div>
           <div id="dashboard-docker"><div class="loading-spinner"><div class="spinner"></div> 扫描中...</div></div>
         </div>
@@ -151,10 +162,26 @@
         <div id="assistant-content"><div class="loading-spinner"><div class="spinner"></div> 加载中...</div></div>
       </section>
 
-      <!-- 系统管理 -->
+	  <!-- Agent 纳管 -->
+	  <section class="page-section" data-page="hosts">
+		<div class="page-header">
+		  <div><h1>Agent 纳管</h1><p class="page-subtitle">Agent 主动申请，管理员确认后统一命名、分组和授权。</p></div>
+		</div>
+		<div id="hosts-content"><div class="loading-spinner"><div class="spinner"></div> 加载主机...</div></div>
+	  </section>
+
+      <!-- 用户与权限 -->
+      <section class="page-section" data-page="users">
+        <div class="page-header">
+          <div><h1>用户与权限</h1><p class="page-subtitle">为普通用户分配可管理的主机范围。</p></div>
+        </div>
+        <div id="users-content"><div class="loading-spinner"><div class="spinner"></div> 加载用户...</div></div>
+      </section>
+
+      <!-- 当前主机备份与审计 -->
       <section class="page-section" data-page="system">
         <div class="page-header">
-          <h1>⚙ 系统与持久化</h1>
+          <h1>备份与审计</h1>
         </div>
         <div id="system-content"><div class="loading-spinner"><div class="spinner"></div> 加载系统信息...</div></div>
       </section>
@@ -165,37 +192,61 @@
   <!-- 规则编辑弹窗 -->
   <div id="rule-modal" class="hidden">
     <div class="modal-overlay" onclick="RuleForm.close()"></div>
-    <div class="modal" id="rule-modal-content"></div>
+    <div class="modal" id="rule-modal-content" role="dialog" aria-modal="true" aria-labelledby="rule-modal-title" tabindex="-1" onkeydown="RuleForm.handleKeydown(event)"></div>
   </div>
 
   <!-- Toast 通知容器 -->
   <div id="toast-container" class="toast-container"></div>
+  <div id="dialog-root"></div>
 
   <!-- 脚本 -->
   <script src="/js/api.js"></script>
   <script src="/js/components/notifications.js"></script>
   <script src="/js/app.js"></script>
+	<script src="/js/components/fleet-overview.js"></script>
   <script src="/js/components/firewall-help.js"></script>
   <script src="/js/components/rules-list.js"></script>
   <script src="/js/components/rule-form.js"></script>
   <script src="/js/components/chains-view.js"></script>
   <script src="/js/components/docker-ports.js"></script>
   <script src="/js/components/rule-assistant.js"></script>
+	<script src="/js/components/host-management.js"></script>
   <script src="/js/components/system-view.js"></script>
 
   <!-- 仪表盘初始化 -->
   <script>
+    let dashboardRefreshSerial = 0;
     async function updateDashboard() {
+	  const serial = ++dashboardRefreshSerial;
+	  const context = AppState.captureHostContext();
+	  const targetHostID = context.hostID;
+	  const stillCurrent = () => serial === dashboardRefreshSerial && AppState.isHostContextCurrent(context) && AppState.page === 'dashboard';
+	  document.getElementById('dash-ipt-ver').textContent = '加载中…';
+	  document.getElementById('dash-kernel').textContent = '加载中…';
+	  document.getElementById('dash-total').textContent = '—';
+	  document.getElementById('dash-enabled').textContent = '—';
+	  document.getElementById('dashboard-rules').innerHTML = '<div class="loading-spinner"><div class="spinner"></div> 加载规则中...</div>';
+	  document.getElementById('dashboard-docker').innerHTML = '<div class="loading-spinner"><div class="spinner"></div> 扫描中...</div>';
       try {
-        const info = await api.getSystemInfo();
-        document.getElementById('dash-ipt-ver').textContent = (info.firewall_backend || '') + ' ' + (info.firewall_version || '—');
+        const info = await api.getSystemInfo(targetHostID);
+		if (!stillCurrent()) return;
+		AppState.systemInfo = info;
+		AppState.renderHostContext();
+		if (targetHostID) AppState.setHostStatus(targetHostID, { ...(AppState.hostStatuses[targetHostID] || {}), loading: false, online: true, error: '' });
+		document.getElementById('dash-ipt-ver').textContent = info.firewall_version || info.firewall_backend || '—';
         document.getElementById('dash-kernel').textContent = info.kernel_version || '—';
         document.getElementById('dash-total').textContent = info.total_rules || 0;
         document.getElementById('dash-enabled').textContent = info.enabled_rules || 0;
-      } catch(e) {}
+	  } catch(e) {
+		if (!stillCurrent()) return;
+		if (targetHostID) AppState.setHostStatus(targetHostID, { online: false, error: e.message });
+		document.getElementById('dash-ipt-ver').textContent = '不可用';
+		document.getElementById('dash-kernel').textContent = '不可用';
+	  }
 
       try {
-		const rules = await api.listRules('', 'packet');
+		const rules = await api.listRules('', 'packet', targetHostID);
+		if (!stillCurrent()) return;
         const recent = rules.slice(0, 5);
         const tbody = document.getElementById('dashboard-rules');
         if (tbody) {
@@ -213,10 +264,14 @@
                 `).join('')}</tbody>
               </table></div>`;
         }
-      } catch(e) {}
+	  } catch(e) {
+		if (!stillCurrent()) return;
+		document.getElementById('dashboard-rules').innerHTML = renderDashboardError('无法读取当前主机规则', e.message);
+	  }
 
       try {
-        const mappings = await api.getDockerMappings();
+        const mappings = await api.getDockerMappings(targetHostID);
+		if (!stillCurrent()) return;
         const ipv4Mappings = mappings.filter(m => dockerMappingFamily(m) === 'ipv4');
         const el = document.getElementById('dashboard-docker');
         if (el) {
@@ -233,13 +288,20 @@
               `).join('')}</div>
               ${ipv4Mappings.length > 5 ? `<div style="padding:0.6rem 1rem;font-size:0.8rem;color:var(--text-muted)">+ ${ipv4Mappings.length - 5} 更多 IPv4 映射</div>` : ''}`;
         }
-      } catch(e) {}
+	  } catch(e) {
+		if (!stillCurrent()) return;
+		document.getElementById('dashboard-docker').innerHTML = renderDashboardError('无法读取当前主机 Docker 映射', e.message);
+	  }
+    }
+
+    function renderDashboardError(summary, detail) {
+      return `<div class="alert alert-error"><strong>${escapeHtml(summary)}。</strong><details class="inline-error-detail"><summary>查看技术详情</summary><pre>${escapeHtml(detail || '未知错误')}</pre></details></div>`;
     }
 
     const origNavigate = AppState.navigate.bind(AppState);
     AppState.navigate = function(page) {
       origNavigate(page);
-      if (page === 'dashboard') updateDashboard();
+      if (AppState.page === 'dashboard') updateDashboard();
     };
   </script>
 </body>

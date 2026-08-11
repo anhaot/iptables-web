@@ -1,0 +1,25 @@
+[Unit]
+Description=iptables-web Lightweight Firewall Agent
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/usr/local/bin/iptables-web-agent
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/iptables-web-agent/agent.env
+ExecStart=/usr/local/bin/iptables-web-agent
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/iptables-web-agent /etc/iptables-web-agent
+ReadOnlyPaths=/proc /sys
+
+[Install]
+WantedBy=multi-user.target

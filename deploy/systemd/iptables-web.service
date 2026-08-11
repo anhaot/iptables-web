@@ -1,0 +1,26 @@
+[Unit]
+Description=iptables-web Firewall Manager
+Documentation=file:///opt/iptables-web/README.md
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/usr/local/bin/iptables-web
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/iptables-web/iptables-web.env
+ExecStart=/usr/local/bin/iptables-web
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/iptables-web
+ReadOnlyPaths=/proc /sys
+
+[Install]
+WantedBy=multi-user.target

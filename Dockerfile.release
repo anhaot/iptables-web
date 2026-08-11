@@ -1,0 +1,11 @@
+FROM alpine:3.20
+
+RUN apk add --no-cache iptables ip6tables ca-certificates tzdata \
+    && install -d -m 0700 /data
+
+COPY bin/iptables-web /usr/local/bin/iptables-web
+COPY scripts/healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod 0755 /usr/local/bin/iptables-web /usr/local/bin/healthcheck.sh
+
+EXPOSE 33801
+ENTRYPOINT ["iptables-web"]

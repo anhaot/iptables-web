@@ -38,7 +38,10 @@ GOCACHE=/tmp/iptables-web-go-cache go test ./...
 go test -race ./...
 go vet ./...
 node scripts/ui-logic-test.js
+bash scripts/integration-smoke.sh
 ```
+
+端到端烟测强制使用回环监听和 `DEV_MODE`，不会修改本机防火墙；需要 `curl` 和 `jq`。涉及真实 iptables 的测试必须放在独立网络命名空间或专用测试机中，不能复用开发机现有规则。
 
 只改文档时也应检查相对链接、命令路径、环境变量名和 API 方法是否与实现一致。
 

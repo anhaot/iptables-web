@@ -1,12 +1,29 @@
-# 文档导航
+# 文档中心
 
-iptables-web 只通过 iptables/iptables-nft 管理 packet 规则。原生 nftables 运行后端已禁用；firewalld 不属于程序管理范围，可继续在程序外管理宿主机服务。
+iptables-web 的用户文档按“部署、纳管、运维、接口、实现”组织。首次上线建议依次阅读部署手册、多主机手册和运维手册；继续开发前必须阅读开发交接文档。
 
-- [部署与配置](deployment.md)：安装方式、环境变量、网络安全、升级与卸载。
-- [架构与实现](architecture.md)：组件、规则同步、数据文件、认证和 Docker 路径。
-- [运维与排障](operations.md)：日常检查、审计、备份恢复、清理和故障处置。
-- [API](api.md)：HTTP 接口与数据模型。
-- [路线图](roadmap.md)：当前边界与后续方向。
-- [贡献指南](../CONTRIBUTING.md)：开发环境、测试、前端同步和发布流程。
+## 使用与运维
 
-规则助手的生成和解读入口均保留，支持 iptables、ip6tables、nftables 和 firewalld；助手只输出文本，不执行命令。
+| 文档 | 适合谁 | 主要内容 |
+| --- | --- | --- |
+| [部署与配置](deployment.md) | 首次部署和平台运维人员 | 内网拓扑、依赖、发布包脚本、源码、完全手动 systemd、Agent、Docker Compose、逐台 HTTPS、升级、回滚、卸载和验收 |
+| [Agent 纳管与按主机授权](multi-host.md) | 多主机管理员 | 无界面 Agent、签名申请、来源 IP 固定、批量审批、独立凭据、HTTP/HTTPS、主机组授权和安全卸载 |
+| [运维与排障](operations.md) | 值班与变更人员 | 日常检查、启动失败、网络/证书、Docker 链路、审计、账户解锁、备份恢复、清理和事故处置 |
+| [HTTP API](api.md) | 集成开发人员 | 响应格式、权限、中心/Agent 固定接口、动态访问密钥和请求示例 |
+
+## 设计与开发
+
+| 文档 | 内容 |
+| --- | --- |
+| [架构与实现](architecture.md) | 控制面/Agent 关系、规则事务、数据文件、认证、审计和 Docker 流量路径 |
+| [路线图](roadmap.md) | 已实现能力和明确尚未实现的边界 |
+| [开发交接与当前状态](development-handoff.md) | 已确认产品决策、安全边界、关键文件、测试命令和继续开发清单 |
+| [贡献指南](../CONTRIBUTING.md) | 开发环境、端到端烟测、前端资源同步、发布包和提交要求 |
+
+## 先明确的边界
+
+- 托管写入只通过 iptables/iptables-nft 兼容层操作 IPv4 packet 规则；
+- 原生 nftables 写入后端已禁用，firewalld 继续由程序外管理；
+- Docker IPv6 映射只读，IPv6/firewalld/nftables 可由规则助手生成文本但不会自动执行；
+- Agent 不提供 Web 页面、用户、主机清单、中心密钥管理或任意 URL 代理；
+- HTTP 只适用于受 ACL 保护的可信内网，跨不可信网络必须使用安全隧道或逐台 HTTPS。

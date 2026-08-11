@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,10 +15,15 @@ import (
 type UserHandler struct {
 	userStore *store.UserStore
 	authStore *store.UserStore
+	hostStore *store.HostStore
 }
 
-func NewUserHandler(us *store.UserStore) *UserHandler {
-	return &UserHandler{userStore: us, authStore: us}
+func NewUserHandler(us *store.UserStore, hostStores ...*store.HostStore) *UserHandler {
+	var hostStore *store.HostStore
+	if len(hostStores) > 0 {
+		hostStore = hostStores[0]
+	}
+	return &UserHandler{userStore: us, authStore: us, hostStore: hostStore}
 }
 
 func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
@@ -54,16 +60,31 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	id, err := newRandomID()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "random_source_failed", "无法生成安全用户标识")
+		return
+	}
 	user := &model.User{
-		ID:        newRandomID(),
-		Username:  req.Username,
-		Password:  req.Password,
-		Role:      req.Role,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:         id,
+		Username:   req.Username,
+		Password:   req.Password,
+		Role:       req.Role,
+		HostIDs:    req.HostIDs,
+		HostGroups: req.HostGroups,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
 	}
 
 	if err := user.Validate(); err != nil {
+		respondError(w, http.StatusBadRequest, "validation_error", err.Error())
+		return
+	}
+	if err := h.userStore.ValidatePassword(user.Password); err != nil {
+		respondError(w, http.StatusBadRequest, "password_policy", err.Error())
+		return
+	}
+	if err := h.validateHostAssignments(user); err != nil {
 		respondError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
@@ -94,12 +115,14 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	updated := &model.User{
-		ID:        id,
-		Username:  req.Username,
-		Password:  req.Password,
-		Role:      req.Role,
-		CreatedAt: existing.CreatedAt,
-		UpdatedAt: time.Now(),
+		ID:         id,
+		Username:   req.Username,
+		Password:   req.Password,
+		Role:       req.Role,
+		HostIDs:    req.HostIDs,
+		HostGroups: req.HostGroups,
+		CreatedAt:  existing.CreatedAt,
+		UpdatedAt:  time.Now(),
 	}
 	updated.Username = strings.TrimSpace(updated.Username)
 	updated.Role = strings.TrimSpace(updated.Role)
@@ -120,9 +143,15 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "validation_error", "角色必须是 admin 或 user")
 		return
 	}
-	if updated.Password != "" && len(updated.Password) < 6 {
-		respondError(w, http.StatusBadRequest, "validation_error", "密码长度至少 6 个字符")
+	if err := h.validateHostAssignments(updated); err != nil {
+		respondError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
+	}
+	if updated.Password != "" {
+		if err := h.userStore.ValidatePassword(updated.Password); err != nil {
+			respondError(w, http.StatusBadRequest, "password_policy", err.Error())
+			return
+		}
 	}
 
 	if err := h.userStore.Update(updated); err != nil {
@@ -132,6 +161,132 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	stored, err := h.userStore.Get(id)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "update_failed", err.Error())
+		return
+	}
+	respondOK(w, stored.ToResponse())
+}
+
+func (h *UserHandler) validateHostAssignments(user *model.User) error {
+	if user.Role == "admin" {
+		user.HostIDs = nil
+		user.HostGroups = nil
+		return nil
+	}
+	if len(user.HostIDs) > 1000 {
+		return fmt.Errorf("单个用户最多分配 1000 台主机")
+	}
+	seen := make(map[string]bool, len(user.HostIDs))
+	validated := make([]string, 0, len(user.HostIDs))
+	for _, raw := range user.HostIDs {
+		id := strings.TrimSpace(raw)
+		if (id != model.LocalHostID && !hostIDPattern.MatchString(id)) || seen[id] {
+			return fmt.Errorf("主机授权包含无效或重复的主机 ID")
+		}
+		if id == model.LocalHostID {
+			seen[id] = true
+			validated = append(validated, id)
+			continue
+		}
+		if h.hostStore == nil {
+			return fmt.Errorf("主机授权存储不可用")
+		}
+		if _, err := h.hostStore.Get(id); err != nil {
+			return fmt.Errorf("授权主机 %s 不存在", id)
+		}
+		seen[id] = true
+		validated = append(validated, id)
+	}
+	user.HostIDs = validated
+	if len(user.HostGroups) > 100 {
+		return fmt.Errorf("单个用户最多分配 100 个主机组")
+	}
+	if len(user.HostGroups) > 0 && h.hostStore == nil {
+		return fmt.Errorf("主机授权存储不可用")
+	}
+	availableGroups := make(map[string]string)
+	if h.hostStore != nil {
+		for _, host := range h.hostStore.List() {
+			group := strings.TrimSpace(host.Group)
+			if group != "" {
+				availableGroups[strings.ToLower(group)] = group
+			}
+		}
+	}
+	seenGroups := make(map[string]bool, len(user.HostGroups))
+	validatedGroups := make([]string, 0, len(user.HostGroups))
+	for _, raw := range user.HostGroups {
+		group := strings.TrimSpace(raw)
+		key := strings.ToLower(group)
+		if group == "" || len([]rune(group)) > 64 || seenGroups[key] {
+			return fmt.Errorf("主机组授权包含无效或重复的主机组")
+		}
+		canonical, ok := availableGroups[key]
+		if !ok {
+			return fmt.Errorf("授权主机组 %s 不存在", group)
+		}
+		seenGroups[key] = true
+		validatedGroups = append(validatedGroups, canonical)
+	}
+	user.HostGroups = validatedGroups
+	return nil
+}
+
+func (h *UserHandler) GetSecurityPolicy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
+		return
+	}
+	respondOK(w, h.userStore.AdminSecurityPolicy())
+}
+
+func (h *UserHandler) UpdateSecurityPolicy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use PUT")
+		return
+	}
+	var policy model.SecurityPolicyUpdateRequest
+	if err := decodeJSONBody(w, r, &policy, defaultJSONBodyLimit); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if err := h.userStore.UpdateSecurityPolicyRequest(policy); err != nil {
+		respondError(w, http.StatusBadRequest, "validation_error", err.Error())
+		return
+	}
+	respondOK(w, h.userStore.AdminSecurityPolicy())
+}
+
+func (h *UserHandler) ResetAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
+		return
+	}
+	id := extractUserID(r.URL.Path)
+	if err := h.userStore.ResetAccount(id); err != nil {
+		respondError(w, http.StatusBadRequest, "reset_failed", err.Error())
+		return
+	}
+	stored, err := h.userStore.Get(id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "reset_failed", err.Error())
+		return
+	}
+	respondOK(w, stored.ToResponse())
+}
+
+func (h *UserHandler) UnlockAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
+		return
+	}
+	id := extractUserID(r.URL.Path)
+	if err := h.userStore.UnlockAccount(id); err != nil {
+		respondError(w, http.StatusBadRequest, "unlock_failed", err.Error())
+		return
+	}
+	stored, err := h.userStore.Get(id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "unlock_failed", err.Error())
 		return
 	}
 	respondOK(w, stored.ToResponse())
@@ -194,10 +349,12 @@ func (h *UserHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, map[string]string{"status": "password_changed"})
 }
 
-func newRandomID() string {
+func newRandomID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
 }
 
 func extractUserID(path string) string {

@@ -12,7 +12,19 @@ function getAuthToken() {
   return sessionStorage.getItem('auth_token') || '';
 }
 
-async function apiRequest(method, path, body, rawJSON) {
+function getSelectedHostID() {
+  return sessionStorage.getItem('selected_host_id') || '';
+}
+
+function scopedAPIPath(path, explicitHostID) {
+  const hostID = explicitHostID === undefined ? getSelectedHostID() : String(explicitHostID || '');
+  if (!hostID) return path;
+  const scopedPrefixes = ['/rules', '/system/', '/docker/', '/health'];
+  if (!scopedPrefixes.some(prefix => path === prefix || path.startsWith(prefix))) return path;
+  return `/hosts/${encodeURIComponent(hostID)}/api${path}`;
+}
+
+async function apiRequest(method, path, body, rawJSON, unscoped, hostID) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   const token = getAuthToken();
   if (token) {
@@ -22,7 +34,8 @@ async function apiRequest(method, path, body, rawJSON) {
     opts.body = rawJSON ? body : JSON.stringify(body);
   }
   try {
-    const resp = await fetch(`${API_BASE}${path}`, opts);
+    const requestPath = unscoped ? path : scopedAPIPath(path, hostID);
+    const resp = await fetch(`${API_BASE}${requestPath}`, opts);
     // Redirect to login if unauthorized
     if (resp.status === 401) {
       sessionStorage.clear();
@@ -54,68 +67,93 @@ const api = {
   login: (username, password) => apiRequest('POST', '/auth/login', { username, password }),
   logout: () => apiRequest('POST', '/auth/logout'),
   sessionCheck: () => apiRequest('GET', '/auth/session'),
+  getAuthPolicy: () => apiRequest('GET', '/auth/policy'),
 
   // Users
   listUsers: () => apiRequest('GET', '/users'),
   getUser: (id) => apiRequest('GET', `/users/${id}`),
   createUser: (user) => apiRequest('POST', '/users', user),
   updateUser: (id, user) => apiRequest('PUT', `/users/${id}`, user),
+  resetAccount: (id) => apiRequest('POST', `/users/${id}/reset-account`),
+  unlockAccount: (id) => apiRequest('POST', `/users/${id}/unlock`),
   deleteUser: (id) => apiRequest('DELETE', `/users/${id}`),
   changePassword: (oldPwd, newPwd) => apiRequest('POST', '/auth/password', { old_password: oldPwd, new_password: newPwd }),
+  getSecurityPolicy: () => apiRequest('GET', '/security-policy'),
+  updateSecurityPolicy: (policy) => apiRequest('PUT', '/security-policy', policy),
+
+  // Managed Agents (always handled by the controller)
+  listHosts: () => apiRequest('GET', '/hosts'),
+  getHost: (id) => apiRequest('GET', `/hosts/${id}`),
+  updateHost: (id, host) => apiRequest('PUT', `/hosts/${id}`, host),
+  deleteHost: (id) => apiRequest('DELETE', `/hosts/${id}`),
+  probeHost: (id) => apiRequest('GET', `/hosts/${id}/probe`),
+  batchCreateRule: (hostIDs, rule) => apiRequest('POST', '/hosts/batch/rules', { host_ids: hostIDs, rule }),
+  listAgentEnrollments: () => apiRequest('GET', '/agent-enrollments'),
+  approveAgentEnrollments: (ids, caPEMByID) => apiRequest('POST', '/agent-enrollments/approve', { ids, ca_pem_by_id: caPEMByID || {} }),
+  rejectAgentEnrollments: (ids) => apiRequest('POST', '/agent-enrollments/reject', { ids }),
+
+  // Compatibility credentials for controller API integrations. Agent
+  // enrollment exchanges its own credential automatically.
+  listAccessKeys: () => apiRequest('GET', '/access-keys'),
+  createAccessKey: (name) => apiRequest('POST', '/access-keys', { name }),
+  deleteAccessKey: (id) => apiRequest('DELETE', `/access-keys/${id}`),
 
   // Rules
-  listRules: (chain, backend) => {
+  listRules: (chain, backend, hostID) => {
     const params = new URLSearchParams();
     if (chain) params.set('chain', chain);
     if (backend) params.set('backend', backend);
     const query = params.toString();
-    return apiRequest('GET', `/rules${query ? `?${query}` : ''}`);
+    return apiRequest('GET', `/rules${query ? `?${query}` : ''}`, undefined, false, false, hostID);
   },
-  getRule: (id) => apiRequest('GET', `/rules/${id}`),
-  createRule: (rule) => apiRequest('POST', '/rules', rule),
-  updateRule: (id, rule) => apiRequest('PUT', `/rules/${id}`, rule),
-  deleteRule: (id) => apiRequest('DELETE', `/rules/${id}`),
-  toggleRule: (id) => apiRequest('POST', `/rules/${id}/toggle`),
-  reorderRules: (chain, ids) => apiRequest('PUT', '/rules/reorder', { backend: 'packet', chain, rule_ids: ids }),
+  listLocalRules: () => apiRequest('GET', '/rules', undefined, false, true),
+  listHostRules: (id) => apiRequest('GET', `/hosts/${encodeURIComponent(id)}/api/rules`, undefined, false, true),
+  getRule: (id, hostID) => apiRequest('GET', `/rules/${id}`, undefined, false, false, hostID),
+  createRule: (rule, hostID) => apiRequest('POST', '/rules', rule, false, false, hostID),
+  updateRule: (id, rule, hostID) => apiRequest('PUT', `/rules/${id}`, rule, false, false, hostID),
+  deleteRule: (id, hostID) => apiRequest('DELETE', `/rules/${id}`, undefined, false, false, hostID),
+  toggleRule: (id, hostID) => apiRequest('POST', `/rules/${id}/toggle`, undefined, false, false, hostID),
+  reorderRules: (chain, ids, hostID) => apiRequest('PUT', '/rules/reorder', { backend: 'packet', chain, rule_ids: ids }, false, false, hostID),
 
   // System
-  getChains: (backend) => apiRequest('GET', `/system/chains?backend=${encodeURIComponent(backend || 'packet')}`),
-  getChainRules: (chain, backend) => apiRequest('GET', `/system/chains/${encodeURIComponent(chain)}/rules?backend=${encodeURIComponent(backend || 'packet')}`),
-  getSystemInfo: () => apiRequest('GET', '/system/status'),
-  backupRules: (backend) => {
+  getChains: (backend, hostID) => apiRequest('GET', `/system/chains?backend=${encodeURIComponent(backend || 'packet')}`, undefined, false, false, hostID),
+  getChainRules: (chain, backend, hostID) => apiRequest('GET', `/system/chains/${encodeURIComponent(chain)}/rules?backend=${encodeURIComponent(backend || 'packet')}`, undefined, false, false, hostID),
+  getSystemInfo: (hostID) => apiRequest('GET', '/system/status', undefined, false, false, hostID),
+  backupRules: (backend, hostID) => {
     const headers = {};
     const token = getAuthToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    return fetch(`${API_BASE}/system/backup?backend=${encodeURIComponent(backend || 'packet')}`, { headers }).then(r => {
+    const path = scopedAPIPath(`/system/backup?backend=${encodeURIComponent(backend || 'packet')}`, hostID);
+    return fetch(`${API_BASE}${path}`, { headers }).then(r => {
       if (r.status === 401) {
         sessionStorage.clear();
         window.location.href = '/login.html';
         throw new Error('请先登录');
       }
-      if (r.status === 403) throw new Error('需要管理员权限');
+      if (r.status === 403) throw new Error('没有当前主机的管理权限');
       if (!r.ok) throw new Error('Backup failed');
       const disposition = r.headers.get('Content-Disposition') || '';
       const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
       return r.blob().then(blob => ({ blob, filename: filenameMatch ? filenameMatch[1] : '' }));
     });
   },
-  restoreRules: (data, backend) => apiRequest('POST', `/system/restore?backend=${encodeURIComponent(backend || 'packet')}`, { data }),
-  restoreRulesFile: (jsonText, backend) => apiRequest('POST', `/system/restore?backend=${encodeURIComponent(backend || 'packet')}`, jsonText, true),
-  clearManagedRules: () => apiRequest('DELETE', '/system/managed-rules'),
-  listAuditEvents: (limit) => apiRequest('GET', `/system/audit?limit=${encodeURIComponent(limit || 50)}`),
-  getRollbackStatus: () => apiRequest('GET', '/system/rollback'),
-  rollbackLastChange: (id) => apiRequest('POST', '/system/rollback', { id }),
-  downloadAudit: () => {
+  restoreRules: (data, backend, hostID) => apiRequest('POST', `/system/restore?backend=${encodeURIComponent(backend || 'packet')}`, { data }, false, false, hostID),
+  restoreRulesFile: (jsonText, backend, hostID) => apiRequest('POST', `/system/restore?backend=${encodeURIComponent(backend || 'packet')}`, jsonText, true, false, hostID),
+  clearManagedRules: (hostID) => apiRequest('DELETE', '/system/managed-rules', undefined, false, false, hostID),
+  listAuditEvents: (limit, hostID) => apiRequest('GET', `/system/audit?limit=${encodeURIComponent(limit || 50)}`, undefined, false, false, hostID),
+  getRollbackStatus: (hostID) => apiRequest('GET', '/system/rollback', undefined, false, false, hostID),
+  rollbackLastChange: (id, hostID) => apiRequest('POST', '/system/rollback', { id }, false, false, hostID),
+  downloadAudit: (hostID) => {
     const headers = {};
     const token = getAuthToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    return fetch(`${API_BASE}/system/audit?download=1`, { headers }).then(r => {
+    return fetch(`${API_BASE}${scopedAPIPath('/system/audit?download=1', hostID)}`, { headers }).then(r => {
       if (r.status === 401) {
         sessionStorage.clear();
         window.location.href = '/login.html';
         throw new Error('请先登录');
       }
-      if (r.status === 403) throw new Error('需要管理员权限');
+      if (r.status === 403) throw new Error('没有当前主机的管理权限');
       if (!r.ok) throw new Error('审计日志导出失败');
       const disposition = r.headers.get('Content-Disposition') || '';
       const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
@@ -124,9 +162,9 @@ const api = {
   },
 
   // Docker
-  getDockerMappings: () => apiRequest('GET', '/docker/mappings'),
-  getDockerDiagnostics: () => apiRequest('GET', '/docker/diagnostics'),
-  createDockerWhitelist: (request) => apiRequest('POST', '/docker/whitelist', request),
+  getDockerMappings: (hostID) => apiRequest('GET', '/docker/mappings', undefined, false, false, hostID),
+  getDockerDiagnostics: (hostID) => apiRequest('GET', '/docker/diagnostics', undefined, false, false, hostID),
+  createDockerWhitelist: (request, hostID) => apiRequest('POST', '/docker/whitelist', request, false, false, hostID),
 
   // Assistant
   listScenarios: () => apiRequest('GET', '/assistant/scenarios'),
@@ -136,3 +174,7 @@ const api = {
   // Health
   health: () => apiRequest('GET', '/health'),
 };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { scopedAPIPath };
+}

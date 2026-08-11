@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,19 +29,35 @@ type UserChange struct {
 	After  *model.UserResponse `json:"after,omitempty"`
 }
 
+type HostChange struct {
+	ID     string                     `json:"id"`
+	Before *model.ManagedHostResponse `json:"before,omitempty"`
+	After  *model.ManagedHostResponse `json:"after,omitempty"`
+}
+
+type AccessKeyChange struct {
+	ID     string                   `json:"id"`
+	Before *model.AccessKeyResponse `json:"before,omitempty"`
+	After  *model.AccessKeyResponse `json:"after,omitempty"`
+}
+
 type AuditEvent struct {
-	ID          string       `json:"id"`
-	CreatedAt   time.Time    `json:"created_at"`
-	RequestID   string       `json:"request_id,omitempty"`
-	Actor       string       `json:"actor"`
-	Role        string       `json:"role,omitempty"`
-	RemoteIP    string       `json:"remote_ip,omitempty"`
-	Method      string       `json:"method"`
-	Path        string       `json:"path"`
-	Action      string       `json:"action"`
-	Status      int          `json:"status"`
-	RuleChanges []RuleChange `json:"rule_changes,omitempty"`
-	UserChanges []UserChange `json:"user_changes,omitempty"`
+	ID                   string                     `json:"id"`
+	CreatedAt            time.Time                  `json:"created_at"`
+	RequestID            string                     `json:"request_id,omitempty"`
+	Actor                string                     `json:"actor"`
+	Role                 string                     `json:"role,omitempty"`
+	RemoteIP             string                     `json:"remote_ip,omitempty"`
+	Method               string                     `json:"method"`
+	Path                 string                     `json:"path"`
+	Action               string                     `json:"action"`
+	Status               int                        `json:"status"`
+	RuleChanges          []RuleChange               `json:"rule_changes,omitempty"`
+	UserChanges          []UserChange               `json:"user_changes,omitempty"`
+	HostChanges          []HostChange               `json:"host_changes,omitempty"`
+	AccessKeyChanges     []AccessKeyChange          `json:"access_key_changes,omitempty"`
+	SecurityPolicyBefore *model.AdminSecurityPolicy `json:"security_policy_before,omitempty"`
+	SecurityPolicyAfter  *model.AdminSecurityPolicy `json:"security_policy_after,omitempty"`
 }
 
 type RollbackState struct {
@@ -73,7 +90,11 @@ func (m *Manager) Record(event AuditEvent) error {
 		return nil
 	}
 	if event.ID == "" {
-		event.ID = newID()
+		id, err := newID()
+		if err != nil {
+			return fmt.Errorf("generate audit ID: %w", err)
+		}
+		event.ID = id
 	}
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now()
@@ -142,8 +163,12 @@ func (m *Manager) SaveRollback(action, actor string, rules []*model.Rule) (*Roll
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
+	id, err := newID()
+	if err != nil {
+		return nil, fmt.Errorf("generate rollback ID: %w", err)
+	}
 	state := &RollbackState{
-		ID:        newID(),
+		ID:        id,
 		CreatedAt: now,
 		ExpiresAt: now.Add(m.window),
 		Action:    action,
@@ -251,6 +276,80 @@ func DiffUsers(before, after []model.UserResponse) []UserChange {
 	return changes
 }
 
+func DiffHosts(before, after []model.ManagedHostResponse) []HostChange {
+	beforeByID := make(map[string]model.ManagedHostResponse, len(before))
+	afterByID := make(map[string]model.ManagedHostResponse, len(after))
+	for _, host := range before {
+		beforeByID[host.ID] = host
+	}
+	for _, host := range after {
+		afterByID[host.ID] = host
+	}
+	set := make(map[string]bool, len(beforeByID)+len(afterByID))
+	for id := range beforeByID {
+		set[id] = true
+	}
+	for id := range afterByID {
+		set[id] = true
+	}
+	changes := make([]HostChange, 0)
+	for _, id := range sortedKeys(set) {
+		oldHost, oldOK := beforeByID[id]
+		newHost, newOK := afterByID[id]
+		if oldOK && newOK && equalJSON(oldHost, newHost) {
+			continue
+		}
+		item := HostChange{ID: id}
+		if oldOK {
+			copy := oldHost
+			item.Before = &copy
+		}
+		if newOK {
+			copy := newHost
+			item.After = &copy
+		}
+		changes = append(changes, item)
+	}
+	return changes
+}
+
+func DiffAccessKeys(before, after []model.AccessKeyResponse) []AccessKeyChange {
+	beforeByID := make(map[string]model.AccessKeyResponse, len(before))
+	afterByID := make(map[string]model.AccessKeyResponse, len(after))
+	for _, key := range before {
+		beforeByID[key.ID] = key
+	}
+	for _, key := range after {
+		afterByID[key.ID] = key
+	}
+	set := make(map[string]bool, len(beforeByID)+len(afterByID))
+	for id := range beforeByID {
+		set[id] = true
+	}
+	for id := range afterByID {
+		set[id] = true
+	}
+	changes := make([]AccessKeyChange, 0)
+	for _, id := range sortedKeys(set) {
+		oldKey, oldOK := beforeByID[id]
+		newKey, newOK := afterByID[id]
+		if oldOK && newOK && equalJSON(oldKey, newKey) {
+			continue
+		}
+		item := AccessKeyChange{ID: id}
+		if oldOK {
+			copy := oldKey
+			item.Before = &copy
+		}
+		if newOK {
+			copy := newKey
+			item.After = &copy
+		}
+		changes = append(changes, item)
+	}
+	return changes
+}
+
 func unionIDs(a, b map[string]*model.Rule) []string {
 	set := make(map[string]bool, len(a)+len(b))
 	for id := range a {
@@ -336,10 +435,10 @@ func writeAtomically(path string, data []byte, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
-func newID() string {
+func newID() (string, error) {
 	bytes := make([]byte, 12)
-	if _, err := rand.Read(bytes); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+	if _, err := io.ReadFull(rand.Reader, bytes); err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(bytes)
+	return hex.EncodeToString(bytes), nil
 }

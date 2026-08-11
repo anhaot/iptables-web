@@ -29,6 +29,8 @@ type Config struct {
 	ListenAddr   string
 	RulesFile    string
 	UsersFile    string
+	HostsFile    string
+	APIKeysFile  string
 	AuditFile    string
 	RollbackFile string
 	LogLevel     string
@@ -39,6 +41,8 @@ func LoadConfig() *Config {
 		ListenAddr:   "0.0.0.0:33801",
 		RulesFile:    "/data/rules.json",
 		UsersFile:    "/data/users.json",
+		HostsFile:    "/data/hosts.json",
+		APIKeysFile:  "/data/api-keys.json",
 		AuditFile:    "/data/audit.jsonl",
 		RollbackFile: "/data/rollback.json",
 		LogLevel:     "info",
@@ -51,6 +55,12 @@ func LoadConfig() *Config {
 		if cfg.UsersFile == "/data/users.json" {
 			cfg.UsersFile = filepath.Join(filepath.Dir(v), "users.json")
 		}
+		if cfg.HostsFile == "/data/hosts.json" {
+			cfg.HostsFile = filepath.Join(filepath.Dir(v), "hosts.json")
+		}
+		if cfg.APIKeysFile == "/data/api-keys.json" {
+			cfg.APIKeysFile = filepath.Join(filepath.Dir(v), "api-keys.json")
+		}
 		if cfg.AuditFile == "/data/audit.jsonl" {
 			cfg.AuditFile = filepath.Join(filepath.Dir(v), "audit.jsonl")
 		}
@@ -60,6 +70,12 @@ func LoadConfig() *Config {
 	}
 	if v := os.Getenv("USERS_FILE"); v != "" {
 		cfg.UsersFile = v
+	}
+	if v := os.Getenv("HOSTS_FILE"); v != "" {
+		cfg.HostsFile = v
+	}
+	if v := os.Getenv("API_KEYS_FILE"); v != "" {
+		cfg.APIKeysFile = v
 	}
 	if v := os.Getenv("AUDIT_FILE"); v != "" {
 		cfg.AuditFile = v
@@ -106,6 +122,22 @@ func main() {
 		log.Fatalf("Failed to load users from %s: %v", cfg.UsersFile, err)
 	}
 	appLog.Infof("Loaded users from %s", cfg.UsersFile)
+
+	// Initialize the encrypted remote-host inventory. Without an explicit
+	// credential key, the store creates and reuses hosts.key automatically.
+	hostStore := store.NewHostStore(cfg.HostsFile, os.Getenv("HOST_CREDENTIAL_KEY"))
+	if err := hostStore.Load(); err != nil {
+		log.Fatalf("Failed to load remote hosts from %s: %v", cfg.HostsFile, err)
+	}
+	appLog.Infof("Loaded remote hosts from %s", cfg.HostsFile)
+
+	// Dynamically managed target access keys. The file stores only one-way
+	// digests, so adding or revoking a key does not require a process restart.
+	apiKeyStore := store.NewAPIKeyStore(cfg.APIKeysFile)
+	if err := apiKeyStore.Load(); err != nil {
+		log.Fatalf("Failed to load API keys from %s: %v", cfg.APIKeysFile, err)
+	}
+	appLog.Infof("Loaded API access keys from %s", cfg.APIKeysFile)
 
 	// Session and captcha cleanup ticker
 	go func() {
@@ -160,8 +192,11 @@ func main() {
 	apiHandler := api.NewHandler(ruleStore, exe)
 	apiHandler.SetChangeManager(change.NewManager(cfg.AuditFile, cfg.RollbackFile, 10*time.Minute))
 	authHandler := api.NewAuthHandler(userStore)
-	userHandler := api.NewUserHandler(userStore)
-	router := api.NewRouter(apiHandler, authHandler, userHandler, userStore, assets.WebFS)
+	userHandler := api.NewUserHandler(userStore, hostStore)
+	hostHandler := api.NewHostHandler(hostStore, userStore)
+	enrollmentHandler := api.NewEnrollmentHandler(hostStore)
+	accessKeyHandler := api.NewAccessKeyHandler(apiKeyStore)
+	router := api.NewRouter(apiHandler, authHandler, userHandler, hostHandler, enrollmentHandler, accessKeyHandler, userStore, apiKeyStore, assets.WebFS)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

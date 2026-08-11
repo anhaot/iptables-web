@@ -2,21 +2,36 @@
 
 const RulesList = {
   rules: [], loading: false, error: null, filterChain: '', searchQuery: '',
-  pendingOrder: null, draggedId: '', interpretationVisible: false,
+  pendingOrder: null, draggedId: '', interpretationVisible: false, refreshSerial: 0,
 
   async refresh() {
+    const serial = ++this.refreshSerial;
+    const context = AppState.captureHostContext();
     this.loading = true; this.error = null; this.pendingOrder = null; this.interpretationVisible = false; this.render();
     try {
-      AppState.systemInfo = await api.getSystemInfo();
-      this.rules = await api.listRules(this.filterChain || '', 'packet');
-    } catch (e) { this.error = e.message; }
-    finally { this.loading = false; this.render(); }
+      const info = await api.getSystemInfo(context.hostID);
+      if (serial !== this.refreshSerial || !AppState.isHostContextCurrent(context)) return;
+      const rules = await api.listRules(this.filterChain || '', 'packet', context.hostID);
+      if (serial !== this.refreshSerial || !AppState.isHostContextCurrent(context)) return;
+      AppState.systemInfo = info;
+      this.rules = rules;
+    } catch (e) {
+      if (serial === this.refreshSerial && AppState.isHostContextCurrent(context)) this.error = e.message;
+    } finally {
+      if (serial === this.refreshSerial && AppState.isHostContextCurrent(context)) {
+        this.loading = false;
+        this.render();
+      }
+    }
   },
 
   async toggle(id) {
     if (!AppState.canManageRules()) return Toasts.error('需要管理员权限');
+    const context = AppState.captureHostContext();
     try {
-      const updated = await api.toggleRule(id);
+      const updated = await api.toggleRule(id, context.hostID);
+      AppState.invalidateRuleSummary(context);
+      if (!AppState.isHostContextCurrent(context)) return;
       const index = this.rules.findIndex(rule => rule.id === id);
       if (index >= 0) this.rules[index] = updated;
       this.render();
@@ -26,8 +41,18 @@ const RulesList = {
 
   async deleteRule(id) {
     if (!AppState.canManageRules()) return Toasts.error('需要管理员权限');
-    if (!confirm('确定要删除此规则吗？此操作不可撤销。')) return;
-    try { await api.deleteRule(id); this.rules = this.rules.filter(rule => rule.id !== id); this.render(); Toasts.success('规则已删除'); }
+    const context = AppState.captureHostContext();
+    const rule = this.rules.find(item => item.id === id);
+    const accepted = await Dialogs.confirm({
+      title: '删除防火墙规则',
+      message: '规则会立即从运行中的防火墙和托管清单中删除，此操作不可撤销。',
+      target: `${AppState.currentHostTarget()} · ${rule ? (rule.desc || `${rule.chain} ${rule.action}`) : id}`,
+      confirmText: '删除规则',
+      danger: true
+    });
+    if (!accepted) return;
+    if (!AppState.isHostContextCurrent(context)) return Toasts.warning('主机已切换，请重新执行删除操作');
+    try { await api.deleteRule(id, context.hostID); AppState.invalidateRuleSummary(context); if (!AppState.isHostContextCurrent(context)) return; this.rules = this.rules.filter(rule => rule.id !== id); this.render(); Toasts.success('规则已删除'); }
     catch (e) { Toasts.error('删除失败：' + e.message); }
   },
 
@@ -75,9 +100,10 @@ const RulesList = {
   async saveOrder() {
     if (!AppState.canManageRules()) return Toasts.error('需要管理员权限');
     if (!this.filterChain || !this.pendingOrder) return;
+    const context = AppState.captureHostContext();
     const risk = findOrderingRisk(this.getOrderedChainRules());
     if (risk) return Toasts.error(risk);
-    try { await api.reorderRules(this.filterChain, this.pendingOrder); Toasts.success('规则顺序已更新'); await this.refresh(); }
+    try { await api.reorderRules(this.filterChain, this.pendingOrder, context.hostID); AppState.invalidateRuleSummary(context); if (!AppState.isHostContextCurrent(context)) return; Toasts.success('规则顺序已更新'); await this.refresh(); }
     catch (e) { Toasts.error('保存顺序失败：' + e.message); }
   },
 
@@ -112,8 +138,8 @@ function renderRulesTable(rules, canManage, canReorder, hasChain) {
     <td class="mono rule-order-cell"><span class="drag-handle ${canReorder ? '' : 'disabled'}">⋮⋮</span>${hasChain ? index+1 : (rule.position || index+1)}</td><td><strong>${escapeHtml(displayRuleDescription(rule))}</strong><div class="rule-id">${escapeHtml((rule.id || '').substring(0,8))}</div></td>
     <td><span class="badge badge-return" title="${escapeHtml(FirewallHelp.chainTitle(rule.chain))}">${escapeHtml(rule.chain)}</span></td><td class="mono">${escapeHtml(rule.source || '任意来源')}</td><td class="mono">${escapeHtml(rule.dest || '任意目标')}</td>
     <td class="mono">${escapeHtml(rule.protocol || 'all')}${rule.dport ? ' dpt:' + escapeHtml(rule.dport) : ''}${rule.original_dest ? ' original-dst:' + escapeHtml(rule.original_dest) : ''}${rule.original_dport ? ' original-dpt:' + escapeHtml(rule.original_dport) : ''}${rule.sport ? ' spt:' + escapeHtml(rule.sport) : ''}</td><td>${actionBadge(rule.action)}</td>
-    <td><label class="toggle"><input type="checkbox" ${rule.enabled ? 'checked' : ''} ${canManage ? '' : 'disabled'} onchange="RulesList.toggle('${escapeHtml(rule.id)}')"><span class="slider"></span></label></td>
-    <td>${canManage ? `<div class="btn-group rule-action-buttons"><button class="btn btn-xs btn-secondary" onclick="RulesList.openEdit('${escapeHtml(rule.id)}')">✎</button><button class="btn btn-xs btn-danger" onclick="RulesList.deleteRule('${escapeHtml(rule.id)}')">✕</button></div>` : '只读'}</td></tr>`).join('')}</tbody></table></div>`;
+    <td><label class="toggle"><input type="checkbox" aria-label="${rule.enabled ? '禁用' : '启用'}规则：${escapeHtml(displayRuleDescription(rule))}" ${rule.enabled ? 'checked' : ''} ${canManage ? '' : 'disabled'} onchange="RulesList.toggle('${escapeHtml(rule.id)}')"><span class="slider"></span></label></td>
+    <td>${canManage ? `<div class="btn-group rule-action-buttons"><button class="btn btn-xs btn-secondary" aria-label="编辑规则：${escapeHtml(displayRuleDescription(rule))}" title="编辑规则" onclick="RulesList.openEdit('${escapeHtml(rule.id)}')">✎</button><button class="btn btn-xs btn-danger" aria-label="删除规则：${escapeHtml(displayRuleDescription(rule))}" title="删除规则" onclick="RulesList.deleteRule('${escapeHtml(rule.id)}')">✕</button></div>` : '只读'}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function actionBadge(action) {

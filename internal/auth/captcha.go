@@ -8,31 +8,54 @@ import (
 	"strings"
 )
 
-// CaptchaQuestion holds a rendered letter CAPTCHA and its answer.
+// CaptchaQuestion holds a rendered mixed-character CAPTCHA and its answer.
 type CaptchaQuestion struct {
 	ID      string
 	Display string // data:image/svg+xml;base64,...
 	Answer  string
 }
 
-const captchaAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+// Ambiguous glyphs (0/O, 1/I/l) are omitted without reducing the character
+// classes available to the challenge.
+const (
+	captchaUppercase = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+	captchaLowercase = "abcdefghijkmnpqrstuvwxyz"
+	captchaDigits    = "23456789"
+	captchaAlphabet  = captchaUppercase + captchaLowercase + captchaDigits
+)
 
 // GenerateCaptchaQuestion creates a readable SVG CAPTCHA.
-func GenerateCaptchaQuestion() CaptchaQuestion {
-	var answer strings.Builder
-	for answer.Len() < 5 {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(captchaAlphabet))))
+func GenerateCaptchaQuestion() (CaptchaQuestion, error) {
+	characters := make([]byte, 0, 5)
+	for _, alphabet := range []string{captchaUppercase, captchaLowercase, captchaDigits, captchaAlphabet, captchaAlphabet} {
+		value, err := captchaByte(alphabet)
 		if err != nil {
-			continue
+			return CaptchaQuestion{}, fmt.Errorf("generate CAPTCHA: %w", err)
 		}
-		answer.WriteByte(captchaAlphabet[n.Int64()])
+		characters = append(characters, value)
 	}
-	code := answer.String()
+	for i := len(characters) - 1; i > 0; i-- {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			return CaptchaQuestion{}, fmt.Errorf("shuffle CAPTCHA: %w", err)
+		}
+		j := int(n.Int64())
+		characters[i], characters[j] = characters[j], characters[i]
+	}
+	code := string(characters)
 
 	return CaptchaQuestion{
 		Display: renderCaptchaSVG(code),
 		Answer:  code,
+	}, nil
+}
+
+func captchaByte(alphabet string) (byte, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+	if err != nil {
+		return 0, err
 	}
+	return alphabet[n.Int64()], nil
 }
 
 func renderCaptchaSVG(code string) string {

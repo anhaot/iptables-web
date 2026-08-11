@@ -6,14 +6,24 @@ import (
 	"time"
 )
 
+// LocalHostID is the stable authorization ID for the controller's own
+// firewall. It may be assigned to ordinary users just like a remote host.
+const LocalHostID = "local"
+
 type User struct {
-	ID                 string    `json:"id"`
-	Username           string    `json:"username"`
-	Password           string    `json:"password,omitempty"` // stored hash; never return through API responses
-	Role               string    `json:"role"`               // admin, user
-	MustChangePassword bool      `json:"must_change_password,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                 string     `json:"id"`
+	Username           string     `json:"username"`
+	Password           string     `json:"password,omitempty"`         // stored hash; never return through API responses
+	PasswordHistory    []string   `json:"password_history,omitempty"` // prior hashes only; never return through API responses
+	Role               string     `json:"role"`                       // admin, user
+	HostIDs            []string   `json:"host_ids,omitempty"`         // ordinary-user managed hosts; admins always manage all hosts
+	HostGroups         []string   `json:"host_groups,omitempty"`      // ordinary-user group grants; membership is resolved dynamically
+	MustChangePassword bool       `json:"must_change_password,omitempty"`
+	PasswordChangedAt  time.Time  `json:"password_changed_at,omitempty"`
+	LoginDisabled      bool       `json:"login_disabled,omitempty"`
+	LoginDisabledAt    *time.Time `json:"login_disabled_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 func (u *User) Validate() error {
@@ -25,8 +35,8 @@ func (u *User) Validate() error {
 	if u.Role != "admin" && u.Role != "user" {
 		return fmt.Errorf("角色必须是 admin 或 user")
 	}
-	if len(u.Password) < 6 {
-		return fmt.Errorf("密码长度至少 6 个字符")
+	if u.Password == "" {
+		return fmt.Errorf("密码不能为空")
 	}
 	return nil
 }
@@ -39,27 +49,36 @@ type LoginRequest struct {
 
 // LoginResponse is returned on successful login
 type LoginResponse struct {
-	Token                  string `json:"token"`
-	Username               string `json:"username"`
-	Role                   string `json:"role"`
-	RequiresPasswordChange bool   `json:"requires_password_change"`
+	Token                  string   `json:"token"`
+	Username               string   `json:"username"`
+	Role                   string   `json:"role"`
+	HostIDs                []string `json:"host_ids,omitempty"`
+	HostGroups             []string `json:"host_groups,omitempty"`
+	RequiresPasswordChange bool     `json:"requires_password_change"`
 }
 
 // CreateUserRequest is the body for creating or updating a user.
 type CreateUserRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password,omitempty"`
-	Role     string `json:"role"`
+	Username   string   `json:"username"`
+	Password   string   `json:"password,omitempty"`
+	Role       string   `json:"role"`
+	HostIDs    []string `json:"host_ids,omitempty"`
+	HostGroups []string `json:"host_groups,omitempty"`
 }
 
 // UserResponse is the safe representation of a user (no password)
 type UserResponse struct {
-	ID                 string    `json:"id"`
-	Username           string    `json:"username"`
-	Role               string    `json:"role"`
-	MustChangePassword bool      `json:"must_change_password"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                 string     `json:"id"`
+	Username           string     `json:"username"`
+	Role               string     `json:"role"`
+	HostIDs            []string   `json:"host_ids"`
+	HostGroups         []string   `json:"host_groups"`
+	MustChangePassword bool       `json:"must_change_password"`
+	PasswordChangedAt  time.Time  `json:"password_changed_at"`
+	LoginDisabled      bool       `json:"login_disabled"`
+	LoginDisabledAt    *time.Time `json:"login_disabled_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 func (u *User) ToResponse() UserResponse {
@@ -67,8 +86,21 @@ func (u *User) ToResponse() UserResponse {
 		ID:                 u.ID,
 		Username:           u.Username,
 		Role:               u.Role,
+		HostIDs:            append([]string(nil), u.HostIDs...),
+		HostGroups:         append([]string(nil), u.HostGroups...),
 		MustChangePassword: u.MustChangePassword,
+		PasswordChangedAt:  u.PasswordChangedAt,
+		LoginDisabled:      u.LoginDisabled,
+		LoginDisabledAt:    cloneTimePointer(u.LoginDisabledAt),
 		CreatedAt:          u.CreatedAt,
 		UpdatedAt:          u.UpdatedAt,
 	}
+}
+
+func cloneTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }

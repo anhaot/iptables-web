@@ -7,6 +7,8 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/${APP_NAME}}"
 DATA_DIR="${DATA_DIR:-/var/lib/${APP_NAME}}"
 BIN_PATH="${BIN_PATH:-/usr/local/bin/${APP_NAME}}"
 SERVICE_FILE="${SERVICE_FILE:-/etc/systemd/system/${APP_NAME}.service}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/${APP_NAME}}"
+ENV_FILE="${ENV_FILE:-${CONFIG_DIR}/${APP_NAME}.env}"
 METADATA_FILE="${INSTALL_DIR}/install.env"
 KEEP_DATA="false"
 KEEP_RULES="false"
@@ -16,6 +18,15 @@ FORCE="false"
 info() { printf '[INFO] %s\n' "$1"; }
 warn() { printf '[WARN] %s\n' "$1" >&2; }
 error() { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
+
+validate_remove_dir() {
+	local name="$1" path="$2"
+	case "${path}" in
+		/|/etc|/usr|/var|/opt|/usr/local|/var/lib|/etc/systemd) error "拒绝删除过宽的 ${name}: ${path}" ;;
+		/*) ;;
+		*) error "${name} 必须是绝对路径: ${path}" ;;
+	esac
+}
 
 usage() {
 	cat <<'EOF'
@@ -51,6 +62,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || error "请使用 root 权限运行卸载脚本"
+[[ "${APP_NAME}" =~ ^[A-Za-z0-9_.@-]+$ ]] || error "APP_NAME 包含非法字符"
 
 metadata_value() {
 	local key="$1"
@@ -64,16 +76,33 @@ unit_value() {
 	sed -n "s|^Environment=${key}=||p" "${SERVICE_FILE}" | tail -n 1
 }
 
+env_value() {
+	local key="$1" raw
+	[ -f "${ENV_FILE}" ] || return 0
+	raw="$(sed -n "s|^${key}=||p" "${ENV_FILE}" | tail -n 1)"
+	if [[ "${raw}" == \"*\" ]]; then raw="${raw:1:${#raw}-2}"; fi
+	raw="${raw//\\\"/\"}"
+	raw="${raw//\\\\/\\}"
+	printf '%s\n' "${raw}"
+}
+
 meta_bin="$(metadata_value BIN_PATH)"
 meta_data="$(metadata_value DATA_DIR)"
 meta_service="$(metadata_value SERVICE_FILE)"
+meta_env="$(metadata_value ENV_FILE)"
+meta_config="$(metadata_value CONFIG_DIR)"
 [ -n "${meta_bin}" ] && BIN_PATH="${meta_bin}"
 [ -n "${meta_data}" ] && DATA_DIR="${meta_data}"
 [ -n "${meta_service}" ] && SERVICE_FILE="${meta_service}"
+[ -n "${meta_env}" ] && ENV_FILE="${meta_env}"
+[ -n "${meta_config}" ] && CONFIG_DIR="${meta_config}"
+validate_remove_dir INSTALL_DIR "${INSTALL_DIR}"
+validate_remove_dir CONFIG_DIR "${CONFIG_DIR}"
+validate_remove_dir DATA_DIR "${DATA_DIR}"
 
-RULES_FILE="$(unit_value RULES_FILE)"
-USERS_FILE="$(unit_value USERS_FILE)"
-FIREWALL_BACKEND="$(unit_value FIREWALL_BACKEND)"
+RULES_FILE="$(env_value RULES_FILE)"; [ -n "${RULES_FILE}" ] || RULES_FILE="$(unit_value RULES_FILE)"
+USERS_FILE="$(env_value USERS_FILE)"; [ -n "${USERS_FILE}" ] || USERS_FILE="$(unit_value USERS_FILE)"
+FIREWALL_BACKEND="$(env_value FIREWALL_BACKEND)"; [ -n "${FIREWALL_BACKEND}" ] || FIREWALL_BACKEND="$(unit_value FIREWALL_BACKEND)"
 [ -n "${RULES_FILE}" ] || RULES_FILE="${DATA_DIR}/rules.json"
 [ -n "${USERS_FILE}" ] || USERS_FILE="${DATA_DIR}/users.json"
 [ -n "${FIREWALL_BACKEND}" ] || FIREWALL_BACKEND="auto"
@@ -117,6 +146,7 @@ systemctl daemon-reload
 systemctl reset-failed "${APP_NAME}" 2>/dev/null || true
 rm -f "${BIN_PATH}"
 rm -rf "${INSTALL_DIR}"
+rm -rf "${CONFIG_DIR}"
 
 if [ "${KEEP_DATA}" = "true" ]; then
 	info "按要求保留数据目录 ${DATA_DIR}"

@@ -48,3 +48,18 @@ func TestDiffRulesAndUsers(t *testing.T) {
 		t.Fatalf("user changes=%#v", userChanges)
 	}
 }
+
+func TestDiffHostsAndAccessKeysUsesSafeResponses(t *testing.T) {
+	beforeHosts := []model.ManagedHostResponse{{ID: "h1", Name: "node", BaseURL: "http://10.0.0.2:33802", HasAPIKey: true, Enabled: true}}
+	afterHosts := []model.ManagedHostResponse{{ID: "h1", Name: "renamed", BaseURL: "http://10.0.0.2:33802", HasAPIKey: true, HasCustomCA: true, Enabled: true}}
+	hostChanges := DiffHosts(beforeHosts, afterHosts)
+	if len(hostChanges) != 1 || hostChanges[0].Before.Name != "node" || hostChanges[0].After.Name != "renamed" || !hostChanges[0].After.HasCustomCA {
+		t.Fatalf("host changes=%#v", hostChanges)
+	}
+	beforeKeys := []model.AccessKeyResponse{{ID: "k1", Name: "old"}}
+	afterKeys := []model.AccessKeyResponse{{ID: "k2", Name: "new"}}
+	keyChanges := DiffAccessKeys(beforeKeys, afterKeys)
+	if len(keyChanges) != 2 || keyChanges[0].After != nil || keyChanges[1].Before != nil {
+		t.Fatalf("access-key changes=%#v", keyChanges)
+	}
+}

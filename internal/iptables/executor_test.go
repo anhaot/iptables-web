@@ -75,6 +75,21 @@ func TestDeleteRulesUsesMatchingBackends(t *testing.T) {
 	}
 }
 
+func TestDeleteOwnedRulesNeverDeletesLegacyLookalike(t *testing.T) {
+	packet := &recordingBackend{}
+	exe := &Executor{backend: packet}
+	rules := []*model.Rule{{ID: "agent-owned", Backend: model.BackendPacket, Chain: "INPUT"}}
+	if err := exe.DeleteOwnedRules(rules); err != nil {
+		t.Fatalf("DeleteOwnedRules() error = %v", err)
+	}
+	if len(packet.deleted) != 1 {
+		t.Fatalf("owned deletions = %d, want 1", len(packet.deleted))
+	}
+	if len(packet.legacyDeleted) != 0 {
+		t.Fatalf("Agent cleanup deleted %d untagged lookalikes", len(packet.legacyDeleted))
+	}
+}
+
 func TestMigrateLegacyRulesOnlyDeletesUnownedRules(t *testing.T) {
 	rule := &model.Rule{ID: "packet-1", Backend: model.BackendPacket, Chain: "INPUT"}
 	legacy := &recordingBackend{}

@@ -181,10 +181,11 @@
     }
     .captcha-box .input-wrap input { height: 46px; padding-left: 2.6rem; }
     #captcha-input {
-      text-transform: uppercase;
       letter-spacing: 0.08em;
       font-weight: 700;
     }
+
+    .captcha-hint { display: block; margin-top: 0.4rem; color: #94a3b8; font-size: 0.72rem; }
 
     .captcha-display {
       width: 100%; height: 46px; padding: 0 0.75rem;
@@ -341,13 +342,14 @@
           <div class="captcha-box">
             <div class="input-wrap">
               <span class="input-icon">&#x1f9e9;</span>
-              <input type="text" id="captcha-input" maxlength="5" placeholder="输入右侧字符" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+              <input type="text" id="captcha-input" maxlength="5" placeholder="输入右侧字符" autocomplete="off" autocapitalize="none" spellcheck="false" required>
             </div>
             <button type="button" class="captcha-display" id="captcha-question" onclick="refreshCaptcha()" title="点击刷新验证码">
               <img class="captcha-image" id="captcha-image" alt="验证码" aria-label="验证码">
               <span class="refresh-dot">&#x21bb;</span>
             </button>
           </div>
+          <small class="captcha-hint" id="captcha-case-hint">验证码包含大小写字母和数字</small>
         </div>
 
         <!-- Submit -->
@@ -376,6 +378,9 @@
         imageEl.src = data.data.question;
         imageEl.alt = '验证码图片';
         document.getElementById('captcha-input').value = '';
+        document.getElementById('captcha-case-hint').textContent = data.data.case_sensitive
+          ? '验证码包含大小写字母和数字，区分大小写'
+          : '验证码包含大小写字母和数字，不区分大小写';
       } else {
         imageEl.alt = '验证码获取失败';
       }

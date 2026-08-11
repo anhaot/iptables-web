@@ -1,17 +1,18 @@
 # ===== Stage 1: Build =====
 FROM golang:1.26.5-alpine AS builder
 
+ARG BUILD_PROCS=2
+
 RUN apk add --no-cache git ca-certificates
 WORKDIR /app
 
-# Cache module downloads
 COPY go.mod ./
-RUN go mod download 2>/dev/null || true
+RUN go mod download
 
 # Copy source and build (go build fetches any missing deps)
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-	    go build -buildvcs=false -ldflags="-s -w -X main.version=docker" \
+RUN GOMAXPROCS=${BUILD_PROCS} CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+	    go build -p=${BUILD_PROCS} -buildvcs=false -ldflags="-s -w -X main.version=docker" \
     -o /iptables-web ./cmd/server
 
 # ===== Stage 2: Runtime =====

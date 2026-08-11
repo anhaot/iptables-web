@@ -10,6 +10,7 @@ const DockerPorts = {
 	searchQuery: '',
 	policyFilter: 'all',
 	expandedPolicies: new Set(),
+	refreshSerial: 0,
 
   setFamily(family) {
     this.family = family === 'ipv6' ? 'ipv6' : 'ipv4';
@@ -36,10 +37,13 @@ const DockerPorts = {
   },
 
   async refresh() {
+    const serial = ++this.refreshSerial;
+    const context = AppState.captureHostContext();
     this.loading = true;
     this.error = null;
     this.render();
-    const results = await Promise.allSettled([api.getDockerMappings(), api.getDockerDiagnostics(), api.listRules('', 'packet')]);
+    const results = await Promise.allSettled([api.getDockerMappings(context.hostID), api.getDockerDiagnostics(context.hostID), api.listRules('', 'packet', context.hostID)]);
+    if (serial !== this.refreshSerial || !AppState.isHostContextCurrent(context)) return;
     if (results[0].status === 'fulfilled') this.mappings = results[0].value;
     else this.error = results[0].reason.message;
     this.diagnostics = results[1].status === 'fulfilled' ? results[1].value : null;
@@ -69,8 +73,11 @@ const DockerPorts = {
 
 	async toggleRule(id) {
 	  if (!AppState.canManageRules()) return Toasts.error('需要管理员权限');
+	  const context = AppState.captureHostContext();
 	  try {
-		const updated = await api.toggleRule(id);
+		const updated = await api.toggleRule(id, context.hostID);
+		AppState.invalidateRuleSummary(context);
+		if (!AppState.isHostContextCurrent(context)) return;
 		Toasts.success(updated.enabled ? '规则已启用' : '规则已禁用');
 		await this.refresh();
 	  } catch (e) {
@@ -80,11 +87,22 @@ const DockerPorts = {
 
 	async deleteRule(id) {
 	  if (!AppState.canManageRules()) return Toasts.error('需要管理员权限');
+	  const context = AppState.captureHostContext();
 	  const rule = this.rules.find(item => item.id === id);
 	  if (!rule) return Toasts.error('规则不存在，请刷新后重试');
-	  if (!confirm('确定删除这条来源规则吗？\n\n' + (rule.desc || rule.source || rule.id))) return;
+	  const accepted = await Dialogs.confirm({
+		title: '删除 Docker 来源规则',
+		message: '删除后该端口的访问策略可能发生变化，请确认规则作用范围。',
+		target: `${AppState.currentHostTarget()} · ${rule.desc || rule.source || rule.id}`,
+		confirmText: '删除规则',
+		danger: true
+	  });
+	  if (!accepted) return;
+	  if (!AppState.isHostContextCurrent(context)) return Toasts.warning('主机已切换，请重新执行删除操作');
 	  try {
-		await api.deleteRule(id);
+		await api.deleteRule(id, context.hostID);
+		AppState.invalidateRuleSummary(context);
+		if (!AppState.isHostContextCurrent(context)) return;
 		Toasts.success('规则已删除');
 		await this.refresh();
 	  } catch (e) {
@@ -152,15 +170,26 @@ const DockerPorts = {
     const promptText = detectedSource
       ? '管理页面连接到 33801 时，服务器看到的 TCP 对端地址是 ' + detectedSource + '。它不一定是物理网卡地址，也不能证明访问 Docker 端口时来源相同；若 18080 走同一路径可直接使用。'
       : '允许访问的来源 IPv4/CIDR，例如 1.2.3.4 或 10.0.0.0/8';
-    const source = prompt(promptText, detectedSource);
+    const source = await Dialogs.prompt({
+      title: '添加 Docker 白名单来源',
+      message: promptText,
+      label: '允许访问的来源 IPv4 / CIDR',
+      defaultValue: detectedSource,
+      placeholder: '例如 1.2.3.4 或 10.0.0.0/8',
+      target: `${AppState.currentHostTarget()} · ${formatHostEndpoint(mapping.host_ip, mapping.host_port)}`,
+      confirmText: '继续配置'
+    });
     if (!source || !source.trim()) return;
 
+    const context = AppState.captureHostContext();
     try {
       const result = await api.createDockerWhitelist({
         source: source.trim(), protocol: mapping.protocol || 'tcp',
         host_ip: mapping.host_ip || '', host_port: mapping.host_port,
         container_name: mapping.container_name || '', container_port: mapping.container_port
-      });
+      }, context.hostID);
+      AppState.invalidateRuleSummary(context);
+      if (!AppState.isHostContextCurrent(context)) return;
       Toasts[result.created === false ? 'info' : 'success'](result.created === false
         ? '这个来源已经在该端口的允许列表中'
         : '白名单已整体应用：允许规则在前，兜底 DROP 在后');

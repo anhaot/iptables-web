@@ -5,11 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"iptables-web/internal/auth"
 	"iptables-web/internal/model"
@@ -19,7 +22,9 @@ import (
 type UserStore struct {
 	mu            sync.RWMutex
 	filePath      string
+	policyPath    string
 	users         []*model.User
+	policy        model.SecurityPolicy
 	sessions      map[string]*Session      // token -> session
 	captchas      map[string]*CaptchaEntry // captcha ID -> code
 	loginAttempts map[string]*LoginAttempt // username -> attempt tracking
@@ -29,14 +34,17 @@ type Session struct {
 	UserID             string
 	Username           string
 	Role               string
+	HostIDs            []string
+	HostGroups         []string
 	MustChangePassword bool
 	ExpiresAt          time.Time
 }
 
 type CaptchaEntry struct {
-	Answer    string
-	Display   string
-	ExpiresAt time.Time
+	Answer        string
+	Display       string
+	CaseSensitive bool
+	ExpiresAt     time.Time
 }
 
 type LoginAttempt struct {
@@ -45,14 +53,14 @@ type LoginAttempt struct {
 }
 
 const (
-	maxLoginFailures = 5
-	lockoutDuration  = 15 * time.Minute
-	captchaTTL       = 5 * time.Minute
+	captchaTTL = 5 * time.Minute
 )
 
 func NewUserStore(filePath string) *UserStore {
 	return &UserStore{
 		filePath:      filePath,
+		policyPath:    filepath.Join(filepath.Dir(filePath), "security-policy.json"),
+		policy:        model.DefaultSecurityPolicy(),
 		sessions:      make(map[string]*Session),
 		captchas:      make(map[string]*CaptchaEntry),
 		loginAttempts: make(map[string]*LoginAttempt),
@@ -62,6 +70,9 @@ func NewUserStore(filePath string) *UserStore {
 func (s *UserStore) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.loadSecurityPolicyLocked(); err != nil {
+		return err
+	}
 
 	data, err := os.ReadFile(s.filePath)
 	if os.IsNotExist(err) {
@@ -88,6 +99,16 @@ func (s *UserStore) Load() error {
 	hasAdmin := false
 	changed := false
 	for _, u := range s.users {
+		if u.PasswordChangedAt.IsZero() {
+			u.PasswordChangedAt = u.UpdatedAt
+			if u.PasswordChangedAt.IsZero() {
+				u.PasswordChangedAt = u.CreatedAt
+			}
+			if u.PasswordChangedAt.IsZero() {
+				u.PasswordChangedAt = time.Now()
+			}
+			changed = true
+		}
 		if u.Role == "admin" {
 			hasAdmin = true
 			if u.Password == "" {
@@ -121,17 +142,120 @@ func (s *UserStore) Load() error {
 	return os.Chmod(s.filePath, 0600)
 }
 
+func (s *UserStore) loadSecurityPolicyLocked() error {
+	data, err := os.ReadFile(s.policyPath)
+	if os.IsNotExist(err) {
+		s.policy = model.DefaultSecurityPolicy()
+		return s.writeSecurityPolicyLocked()
+	}
+	if err != nil {
+		return fmt.Errorf("读取安全策略: %w", err)
+	}
+	policy := model.DefaultSecurityPolicy()
+	if err := json.Unmarshal(data, &policy); err != nil {
+		return fmt.Errorf("解析安全策略: %w", err)
+	}
+	if err := policy.Validate(); err != nil {
+		return fmt.Errorf("安全策略无效: %w", err)
+	}
+	s.policy = policy
+	return os.Chmod(s.policyPath, 0600)
+}
+
+func (s *UserStore) SecurityPolicy() model.SecurityPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.policy
+}
+
+func (s *UserStore) PublicSecurityPolicy() model.PublicSecurityPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.policy.PublicView()
+}
+
+func (s *UserStore) AdminSecurityPolicy() model.AdminSecurityPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.policy.AdminView()
+}
+
+func (s *UserStore) UpdateSecurityPolicy(policy model.SecurityPolicy) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.policy
+	s.policy = policy
+	if err := s.writeSecurityPolicyLocked(); err != nil {
+		s.policy = previous
+		return err
+	}
+	return nil
+}
+
+func (s *UserStore) UpdateSecurityPolicyRequest(request model.SecurityPolicyUpdateRequest) error {
+	s.mu.RLock()
+	currentLogin := s.policy.Login
+	s.mu.RUnlock()
+	login := request.Login
+	// Keep PUT compatibility with clients from before login policy existed.
+	if login.MaxFailures == 0 && login.LockoutMode == "" && login.LockoutMinutes == 0 && login.PasswordMaxAgeDays == 0 && login.DefaultResetPassword == "" {
+		login.MaxFailures = currentLogin.MaxFailures
+		login.LockoutMode = currentLogin.LockoutMode
+		login.LockoutMinutes = currentLogin.LockoutMinutes
+		login.PasswordMaxAgeDays = currentLogin.PasswordMaxAgeDays
+	}
+	policy := model.SecurityPolicy{
+		Password: request.Password,
+		Captcha:  request.Captcha,
+		Login: model.LoginPolicy{
+			MaxFailures:              login.MaxFailures,
+			LockoutMode:              login.LockoutMode,
+			LockoutMinutes:           login.LockoutMinutes,
+			PasswordMaxAgeDays:       login.PasswordMaxAgeDays,
+			DefaultResetPasswordHash: currentLogin.DefaultResetPasswordHash,
+		},
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	if login.DefaultResetPassword != "" {
+		if err := validatePasswordPolicy(login.DefaultResetPassword, "", policy.Password); err != nil {
+			return fmt.Errorf("默认重置密码不符合密码策略: %w", err)
+		}
+		hash, err := auth.HashPassword(login.DefaultResetPassword)
+		if err != nil {
+			return fmt.Errorf("默认重置密码加密失败: %w", err)
+		}
+		policy.Login.DefaultResetPasswordHash = string(hash)
+	}
+	return s.UpdateSecurityPolicy(policy)
+}
+
+func (s *UserStore) ValidatePassword(password string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return validatePasswordPolicy(password, "", s.policy.Password)
+}
+
 func (s *UserStore) createDefaultAdminLocked() error {
 	hash, err := auth.HashPassword("admin123")
 	if err != nil {
 		return fmt.Errorf("创建默认管理员失败: %w", err)
 	}
+	id, err := newUserID()
+	if err != nil {
+		return fmt.Errorf("创建默认管理员标识失败: %w", err)
+	}
 	admin := &model.User{
-		ID:                 newUserID(),
+		ID:                 id,
 		Username:           "admin",
 		Password:           string(hash),
 		Role:               "admin",
 		MustChangePassword: true,
+		PasswordChangedAt:  time.Now(),
 		CreatedAt:          time.Now(),
 		UpdatedAt:          time.Now(),
 	}
@@ -165,6 +289,9 @@ func (s *UserStore) Get(id string) (*model.User, error) {
 func (s *UserStore) Create(user *model.User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := validatePasswordPolicy(user.Password, "", s.policy.Password); err != nil {
+		return err
+	}
 
 	for _, u := range s.users {
 		if strings.EqualFold(u.Username, user.Username) {
@@ -177,7 +304,15 @@ func (s *UserStore) Create(user *model.User) error {
 		return fmt.Errorf("密码加密失败: %w", err)
 	}
 	user.Password = string(hash)
+	user.PasswordHistory = nil
 	user.MustChangePassword = true
+	user.PasswordChangedAt = time.Now()
+	user.LoginDisabled = false
+	user.LoginDisabledAt = nil
+	if user.Role == "admin" {
+		user.HostIDs = nil
+		user.HostGroups = nil
+	}
 	stored := cloneUser(user)
 	s.users = append(s.users, stored)
 	if err := s.writeFileLocked(); err != nil {
@@ -202,16 +337,34 @@ func (s *UserStore) Update(user *model.User) error {
 			passwordChanged := updated.Password != ""
 			updated.UpdatedAt = time.Now()
 			updated.CreatedAt = u.CreatedAt
+			if updated.Role == "admin" {
+				updated.HostIDs = nil
+				updated.HostGroups = nil
+			}
 			if passwordChanged {
+				if err := validatePasswordPolicy(updated.Password, "", s.policy.Password); err != nil {
+					return err
+				}
+				if passwordMatchesHashes(updated.Password, passwordHashesToCheck(u.Password, u.PasswordHistory, s.policy.Password.HistoryCount)) {
+					return fmt.Errorf("新密码不能与当前密码或最近使用的密码相同")
+				}
 				hash, err := auth.HashPassword(updated.Password)
 				if err != nil {
 					return fmt.Errorf("密码加密失败: %w", err)
 				}
+				updated.PasswordHistory = nextPasswordHistory(u.Password, u.PasswordHistory, s.policy.Password.HistoryCount)
 				updated.Password = string(hash)
 				updated.MustChangePassword = true
+				updated.PasswordChangedAt = time.Now()
+				updated.LoginDisabled = false
+				updated.LoginDisabledAt = nil
 			} else {
 				updated.Password = u.Password
+				updated.PasswordHistory = append([]string(nil), u.PasswordHistory...)
 				updated.MustChangePassword = u.MustChangePassword
+				updated.PasswordChangedAt = u.PasswordChangedAt
+				updated.LoginDisabled = u.LoginDisabled
+				updated.LoginDisabledAt = cloneTime(u.LoginDisabledAt)
 			}
 			s.users[i] = updated
 			if err := s.writeFileLocked(); err != nil {
@@ -260,6 +413,73 @@ func (s *UserStore) Delete(id string) error {
 	return fmt.Errorf("用户 %s 不存在", id)
 }
 
+// ResetAccount restores an ordinary user to the administrator-configured
+// default password, clears account lockout state, revokes active sessions and
+// requires a password change at the next login.
+func (s *UserStore) ResetAccount(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.policy.Login.DefaultResetPasswordHash == "" {
+		return fmt.Errorf("尚未配置账户重置默认密码")
+	}
+	for i, user := range s.users {
+		if user.ID != id {
+			continue
+		}
+		if user.Role != "user" {
+			return fmt.Errorf("只能重置普通用户账户")
+		}
+		previous := cloneUser(user)
+		updated := cloneUser(user)
+		updated.PasswordHistory = nextPasswordHistory(user.Password, user.PasswordHistory, s.policy.Password.HistoryCount)
+		updated.Password = s.policy.Login.DefaultResetPasswordHash
+		updated.MustChangePassword = true
+		updated.PasswordChangedAt = time.Now()
+		updated.LoginDisabled = false
+		updated.LoginDisabledAt = nil
+		updated.UpdatedAt = time.Now()
+		s.users[i] = updated
+		if err := s.writeFileLocked(); err != nil {
+			s.users[i] = previous
+			return err
+		}
+		delete(s.loginAttempts, loginAttemptKey(user.Username, ""))
+		s.deleteSessionsForUserLocked(user.ID)
+		return nil
+	}
+	return fmt.Errorf("用户 %s 不存在", id)
+}
+
+// UnlockAccount clears a persistent administrator lock without changing the
+// password. ResetAccount remains the separate default-password workflow for
+// ordinary users.
+func (s *UserStore) UnlockAccount(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, user := range s.users {
+		if user.ID != id {
+			continue
+		}
+		if !user.LoginDisabled {
+			delete(s.loginAttempts, loginAttemptKey(user.Username, ""))
+			return nil
+		}
+		previous := cloneUser(user)
+		updated := cloneUser(user)
+		updated.LoginDisabled = false
+		updated.LoginDisabledAt = nil
+		updated.UpdatedAt = time.Now()
+		s.users[i] = updated
+		if err := s.writeFileLocked(); err != nil {
+			s.users[i] = previous
+			return err
+		}
+		delete(s.loginAttempts, loginAttemptKey(user.Username, ""))
+		return nil
+	}
+	return fmt.Errorf("用户 %s 不存在", id)
+}
+
 func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -269,26 +489,38 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 			if !auth.VerifyPassword(oldPassword, u.Password) {
 				return fmt.Errorf("原密码不正确")
 			}
-			if len(newPassword) < 6 {
-				return fmt.Errorf("新密码长度至少 6 个字符")
+			if err := validatePasswordPolicy(newPassword, oldPassword, s.policy.Password); err != nil {
+				return err
 			}
-			if auth.VerifyPassword(newPassword, u.Password) {
-				return fmt.Errorf("新密码不能与原密码相同")
+			if passwordMatchesHashes(newPassword, passwordHashesToCheck(u.Password, u.PasswordHistory, s.policy.Password.HistoryCount)) {
+				return fmt.Errorf("新密码不能与当前密码或最近使用的密码相同")
 			}
 			hash, err := auth.HashPassword(newPassword)
 			if err != nil {
 				return fmt.Errorf("密码加密失败: %w", err)
 			}
-			oldPassword := u.Password
+			oldPasswordHash := u.Password
+			oldPasswordHistory := append([]string(nil), u.PasswordHistory...)
 			oldUpdatedAt := u.UpdatedAt
 			oldMustChangePassword := u.MustChangePassword
+			oldPasswordChangedAt := u.PasswordChangedAt
+			oldLoginDisabled := u.LoginDisabled
+			oldLoginDisabledAt := cloneTime(u.LoginDisabledAt)
+			u.PasswordHistory = nextPasswordHistory(u.Password, u.PasswordHistory, s.policy.Password.HistoryCount)
 			u.Password = string(hash)
 			u.MustChangePassword = false
+			u.PasswordChangedAt = time.Now()
+			u.LoginDisabled = false
+			u.LoginDisabledAt = nil
 			u.UpdatedAt = time.Now()
 			if err := s.writeFileLocked(); err != nil {
-				u.Password = oldPassword
+				u.Password = oldPasswordHash
+				u.PasswordHistory = oldPasswordHistory
 				u.UpdatedAt = oldUpdatedAt
 				u.MustChangePassword = oldMustChangePassword
+				u.PasswordChangedAt = oldPasswordChangedAt
+				u.LoginDisabled = oldLoginDisabled
+				u.LoginDisabledAt = oldLoginDisabledAt
 				return err
 			}
 			s.deleteSessionsForUserLocked(id)
@@ -306,6 +538,9 @@ func (s *UserStore) Login(username, password string) (*model.LoginResponse, erro
 
 	for _, u := range s.users {
 		if strings.EqualFold(u.Username, username) {
+			if u.LoginDisabled {
+				return nil, fmt.Errorf("账户已被管理员锁定")
+			}
 			if !auth.VerifyPassword(password, u.Password) {
 				return nil, fmt.Errorf("用户名或密码错误")
 			}
@@ -324,23 +559,41 @@ func (s *UserStore) Login(username, password string) (*model.LoginResponse, erro
 					return nil, fmt.Errorf("更新密码哈希失败: %w", err)
 				}
 			}
-			token := generateToken()
+			token, err := generateToken()
+			if err != nil {
+				return nil, fmt.Errorf("生成登录会话失败: %w", err)
+			}
 			s.sessions[token] = &Session{
 				UserID:             u.ID,
 				Username:           u.Username,
 				Role:               u.Role,
-				MustChangePassword: u.MustChangePassword,
+				HostIDs:            append([]string(nil), u.HostIDs...),
+				HostGroups:         append([]string(nil), u.HostGroups...),
+				MustChangePassword: s.passwordChangeRequiredLocked(u, time.Now()),
 				ExpiresAt:          time.Now().Add(24 * time.Hour),
 			}
 			return &model.LoginResponse{
 				Token:                  token,
 				Username:               u.Username,
 				Role:                   u.Role,
-				RequiresPasswordChange: u.MustChangePassword,
+				HostIDs:                append([]string(nil), u.HostIDs...),
+				HostGroups:             append([]string(nil), u.HostGroups...),
+				RequiresPasswordChange: s.passwordChangeRequiredLocked(u, time.Now()),
 			}, nil
 		}
 	}
 	return nil, fmt.Errorf("用户名或密码错误")
+}
+
+func (s *UserStore) passwordChangeRequiredLocked(user *model.User, now time.Time) bool {
+	if user.MustChangePassword {
+		return true
+	}
+	days := s.policy.Login.PasswordMaxAgeDays
+	if days <= 0 || user.PasswordChangedAt.IsZero() {
+		return false
+	}
+	return !now.Before(user.PasswordChangedAt.Add(time.Duration(days) * 24 * time.Hour))
 }
 
 func (s *UserStore) Logout(token string) {
@@ -365,7 +618,13 @@ func (s *UserStore) ValidateSession(token string) (*Session, error) {
 		if user.ID == sess.UserID {
 			sess.Username = user.Username
 			sess.Role = user.Role
-			sess.MustChangePassword = user.MustChangePassword
+			sess.HostIDs = append(sess.HostIDs[:0], user.HostIDs...)
+			sess.HostGroups = append(sess.HostGroups[:0], user.HostGroups...)
+			if user.LoginDisabled {
+				delete(s.sessions, token)
+				return nil, fmt.Errorf("账户已被管理员锁定")
+			}
+			sess.MustChangePassword = s.passwordChangeRequiredLocked(user, time.Now())
 			copy := *sess
 			return &copy, nil
 		}
@@ -386,13 +645,21 @@ func (s *UserStore) CleanupExpiredSessions() {
 
 // ==================== CAPTCHA ====================
 
-func (s *UserStore) NewCaptcha() (id string, display string) {
-	q := auth.GenerateCaptchaQuestion()
-	id = generateToken()[:16]
+func (s *UserStore) NewCaptcha() (id string, display string, caseSensitive bool, err error) {
+	q, err := auth.GenerateCaptchaQuestion()
+	if err != nil {
+		return "", "", false, err
+	}
+	token, err := generateToken()
+	if err != nil {
+		return "", "", false, fmt.Errorf("生成验证码标识失败: %w", err)
+	}
+	id = token[:16]
 	s.mu.Lock()
-	s.captchas[id] = &CaptchaEntry{Answer: q.Answer, Display: q.Display, ExpiresAt: time.Now().Add(captchaTTL)}
+	caseSensitive = s.policy.Captcha.CaseSensitive
+	s.captchas[id] = &CaptchaEntry{Answer: q.Answer, Display: q.Display, CaseSensitive: caseSensitive, ExpiresAt: time.Now().Add(captchaTTL)}
 	s.mu.Unlock()
-	return id, q.Display
+	return id, q.Display, caseSensitive, nil
 }
 
 func (s *UserStore) ValidateCaptcha(id string, answer string) bool {
@@ -408,8 +675,31 @@ func (s *UserStore) ValidateCaptcha(id string, answer string) bool {
 		s.mu.Unlock()
 		return false
 	}
-	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(answer), " ", ""))
-	return entry.Answer == normalized
+	normalized := strings.ReplaceAll(strings.TrimSpace(answer), " ", "")
+	if entry.CaseSensitive {
+		return entry.Answer == normalized
+	}
+	return strings.EqualFold(entry.Answer, normalized)
+}
+
+// ValidateAndConsumeCaptcha atomically removes and checks a challenge. Every
+// attempted answer consumes the challenge, including an incorrect answer.
+func (s *UserStore) ValidateAndConsumeCaptcha(id string, answer string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.captchas[id]
+	if !ok {
+		return false
+	}
+	delete(s.captchas, id)
+	if time.Now().After(entry.ExpiresAt) {
+		return false
+	}
+	normalized := strings.ReplaceAll(strings.TrimSpace(answer), " ", "")
+	if entry.CaseSensitive {
+		return entry.Answer == normalized
+	}
+	return strings.EqualFold(entry.Answer, normalized)
 }
 
 // ConsumeCaptcha removes a captcha after successful use.
@@ -422,10 +712,14 @@ func (s *UserStore) ConsumeCaptcha(id string) {
 // ==================== Login Lockout ====================
 
 // CheckLoginLocked returns an error if the account is locked.
-// DEBUG
 func (s *UserStore) CheckLoginLocked(username, sourceIP string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	for _, user := range s.users {
+		if strings.EqualFold(user.Username, username) && user.LoginDisabled {
+			return fmt.Errorf("账户已被管理员锁定，请联系管理员重置账户")
+		}
+	}
 
 	att, ok := s.loginAttempts[loginAttemptKey(username, sourceIP)]
 	if !ok {
@@ -440,7 +734,7 @@ func (s *UserStore) CheckLoginLocked(username, sourceIP string) error {
 }
 
 // RecordLoginFailure increments the failure counter and locks if threshold reached.
-func (s *UserStore) RecordLoginFailure(username, sourceIP string) {
+func (s *UserStore) RecordLoginFailure(username, sourceIP string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -450,14 +744,48 @@ func (s *UserStore) RecordLoginFailure(username, sourceIP string) {
 		// Reset if lock has expired naturally
 		att = &LoginAttempt{}
 		s.loginAttempts[key] = att
-	} else if !ok {
-		att = &LoginAttempt{}
-		s.loginAttempts[key] = att
 	}
 	att.Failures++
-	if att.Failures >= maxLoginFailures {
-		att.LockedUntil = time.Now().Add(lockoutDuration)
+	if att.Failures < s.policy.Login.MaxFailures {
+		return nil
 	}
+	if s.policy.Login.LockoutMode == model.LockoutModeTimed {
+		att.LockedUntil = time.Now().Add(time.Duration(s.policy.Login.LockoutMinutes) * time.Minute)
+		return nil
+	}
+	for _, user := range s.users {
+		if !strings.EqualFold(user.Username, username) {
+			continue
+		}
+		// Preserve a recovery path: administrator mode may persistently lock an
+		// admin only while another enabled admin remains. The last enabled admin
+		// receives the configured timed lock instead.
+		if user.Role == "admin" {
+			enabledAdmins := 0
+			for _, candidate := range s.users {
+				if candidate.Role == "admin" && !candidate.LoginDisabled {
+					enabledAdmins++
+				}
+			}
+			if enabledAdmins <= 1 {
+				att.LockedUntil = time.Now().Add(time.Duration(s.policy.Login.LockoutMinutes) * time.Minute)
+				return nil
+			}
+		}
+		previousDisabled := user.LoginDisabled
+		previousDisabledAt := cloneTime(user.LoginDisabledAt)
+		now := time.Now()
+		user.LoginDisabled = true
+		user.LoginDisabledAt = &now
+		if err := s.writeFileLocked(); err != nil {
+			user.LoginDisabled = previousDisabled
+			user.LoginDisabledAt = previousDisabledAt
+			return err
+		}
+		s.deleteSessionsForUserLocked(user.ID)
+		break
+	}
+	return nil
 }
 
 // RecordLoginSuccess resets the failure counter on successful login.
@@ -468,7 +796,7 @@ func (s *UserStore) RecordLoginSuccess(username, sourceIP string) {
 }
 
 func loginAttemptKey(username, sourceIP string) string {
-	return strings.ToLower(strings.TrimSpace(username)) + "\x00" + strings.TrimSpace(sourceIP)
+	return strings.ToLower(strings.TrimSpace(username))
 }
 
 // CleanupExpiredCaptchas removes expired captcha entries; call periodically.
@@ -494,6 +822,17 @@ func (s *UserStore) writeFileLocked() error {
 	return writeFileAtomically(s.filePath, data, 0600)
 }
 
+func (s *UserStore) writeSecurityPolicyLocked() error {
+	if err := os.MkdirAll(filepath.Dir(s.policyPath), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(s.policy, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomically(s.policyPath, data, 0600)
+}
+
 func (s *UserStore) deleteSessionsForUserLocked(userID string) {
 	for token, session := range s.sessions {
 		if session.UserID == userID {
@@ -507,17 +846,156 @@ func cloneUser(user *model.User) *model.User {
 		return nil
 	}
 	copy := *user
+	copy.HostIDs = append([]string(nil), user.HostIDs...)
+	copy.HostGroups = append([]string(nil), user.HostGroups...)
+	copy.PasswordHistory = append([]string(nil), user.PasswordHistory...)
+	copy.LoginDisabledAt = cloneTime(user.LoginDisabledAt)
 	return &copy
 }
 
-func newUserID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
-func generateToken() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+func validatePasswordPolicy(password, previous string, policy model.PasswordPolicy) error {
+	if !utf8.ValidString(password) {
+		return fmt.Errorf("密码必须是有效的 UTF-8 文本")
+	}
+	runes := []rune(password)
+	if len(runes) < policy.MinLength {
+		return fmt.Errorf("密码长度至少 %d 个字符", policy.MinLength)
+	}
+	if len(runes) > 128 {
+		return fmt.Errorf("密码长度不能超过 128 个字符")
+	}
+	var uppercase, lowercase, digits, special int
+	for _, value := range runes {
+		switch {
+		case unicode.IsUpper(value):
+			uppercase++
+		case unicode.IsLower(value):
+			lowercase++
+		case unicode.IsDigit(value):
+			digits++
+		default:
+			special++
+		}
+	}
+	if uppercase < policy.MinUppercase {
+		return fmt.Errorf("密码至少包含 %d 个大写字母", policy.MinUppercase)
+	}
+	if lowercase < policy.MinLowercase {
+		return fmt.Errorf("密码至少包含 %d 个小写字母", policy.MinLowercase)
+	}
+	if digits < policy.MinDigits {
+		return fmt.Errorf("密码至少包含 %d 个数字", policy.MinDigits)
+	}
+	if special < policy.MinSpecial {
+		return fmt.Errorf("密码至少包含 %d 个特殊字符", policy.MinSpecial)
+	}
+	if previous != "" && changedCharacterCount(previous, password) < policy.MinChangedCharacters {
+		return fmt.Errorf("新密码与当前密码至少需要有 %d 个字符位置不同", policy.MinChangedCharacters)
+	}
+	return nil
+}
+
+func changedCharacterCount(previous, next string) int {
+	oldRunes := []rune(previous)
+	newRunes := []rune(next)
+	length := len(oldRunes)
+	if len(newRunes) > length {
+		length = len(newRunes)
+	}
+	changed := 0
+	for i := 0; i < length; i++ {
+		if i >= len(oldRunes) || i >= len(newRunes) || oldRunes[i] != newRunes[i] {
+			changed++
+		}
+	}
+	return changed
+}
+
+func passwordMatchesHashes(password string, hashes []string) bool {
+	for _, hash := range hashes {
+		if hash != "" && auth.VerifyPassword(password, hash) {
+			return true
+		}
+	}
+	return false
+}
+
+func nextPasswordHistory(current string, existing []string, limit int) []string {
+	if limit <= 1 {
+		return nil
+	}
+	history := append([]string{current}, existing...)
+	if len(history) > limit-1 {
+		history = history[:limit-1]
+	}
+	return history
+}
+
+func passwordHashesToCheck(current string, existing []string, limit int) []string {
+	hashes := []string{current}
+	if limit <= 1 {
+		return hashes
+	}
+	count := limit - 1
+	if len(existing) < count {
+		count = len(existing)
+	}
+	return append(hashes, existing[:count]...)
+}
+
+// RemoveHostAssignment removes a deleted host from every ordinary user's
+// authorization scope. Stale host IDs would be harmless, but pruning them
+// keeps the persisted permission model explainable and prevents accidental
+// reuse if an ID is ever restored from backup.
+func (s *UserStore) RemoveHostAssignment(hostID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	original := make([]*model.User, len(s.users))
+	for i, user := range s.users {
+		original[i] = cloneUser(user)
+	}
+	changed := false
+	for _, user := range s.users {
+		filtered := user.HostIDs[:0]
+		for _, id := range user.HostIDs {
+			if id == hostID {
+				changed = true
+				continue
+			}
+			filtered = append(filtered, id)
+		}
+		user.HostIDs = filtered
+	}
+	if !changed {
+		return nil
+	}
+	if err := s.writeFileLocked(); err != nil {
+		s.users = original
+		return err
+	}
+	return nil
+}
+
+func newUserID() (string, error) {
+	return randomHex(8)
+}
+
+func generateToken() (string, error) {
+	return randomHex(32)
+}
+
+func randomHex(size int) (string, error) {
+	b := make([]byte, size)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }

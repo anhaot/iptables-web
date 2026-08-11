@@ -13,6 +13,8 @@ func TestLoadConfigDefaultsToExternalListenAddress(t *testing.T) {
 	t.Setenv("LISTEN_ADDR", "")
 	t.Setenv("RULES_FILE", "")
 	t.Setenv("USERS_FILE", "")
+	t.Setenv("HOSTS_FILE", "")
+	t.Setenv("API_KEYS_FILE", "")
 	cfg := LoadConfig()
 	if cfg.ListenAddr != "0.0.0.0:33801" {
 		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, "0.0.0.0:33801")
@@ -63,6 +65,12 @@ func TestLoadConfigKeepsChangeFilesBesideRules(t *testing.T) {
 	}
 	if cfg.RollbackFile != filepath.Join(dir, "rollback.json") {
 		t.Fatalf("RollbackFile = %q", cfg.RollbackFile)
+	}
+	if cfg.HostsFile != filepath.Join(dir, "hosts.json") {
+		t.Fatalf("HostsFile = %q", cfg.HostsFile)
+	}
+	if cfg.APIKeysFile != filepath.Join(dir, "api-keys.json") {
+		t.Fatalf("APIKeysFile = %q", cfg.APIKeysFile)
 	}
 }
 

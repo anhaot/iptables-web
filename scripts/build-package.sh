@@ -3,9 +3,11 @@
 set -euo pipefail
 
 APP_NAME="${APP_NAME:-iptables-web}"
+AGENT_NAME="${AGENT_NAME:-iptables-web-agent}"
 VERSION="${VERSION:-$(date +%Y%m%d%H%M%S)}"
 GOOS_TARGET="${GOOS_TARGET:-linux}"
 GOARCH_TARGET="${GOARCH_TARGET:-amd64}"
+BUILD_PROCS="${BUILD_PROCS:-2}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 WORK_DIR="${DIST_DIR}/${APP_NAME}-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}"
@@ -15,6 +17,7 @@ info() { echo "[INFO] $1"; }
 error() { echo "[ERROR] $1" >&2; exit 1; }
 
 command -v go >/dev/null 2>&1 || error "构建预编译包需要 Go。目标机器安装时不需要 Go。"
+[[ "${BUILD_PROCS}" =~ ^[1-9][0-9]*$ ]] || error "BUILD_PROCS 必须是正整数"
 
 GO_VERSION="$(go env GOVERSION)"
 GO_MINOR="$(printf '%s' "${GO_VERSION}" | sed -n 's/^go1\.\([0-9][0-9]*\).*/\1/p')"
@@ -29,7 +32,7 @@ cp -r web assets/web
 
 info "运行测试..."
 GO_BUILD_CACHE="${GOCACHE:-/tmp/go-build-cache}"
-GOCACHE="${GO_BUILD_CACHE}" go test ./...
+GOMAXPROCS="${BUILD_PROCS}" GOCACHE="${GO_BUILD_CACHE}" go test -p="${BUILD_PROCS}" ./...
 if command -v node >/dev/null 2>&1; then
 	node scripts/ui-logic-test.js
 else
@@ -38,19 +41,28 @@ fi
 
 info "编译 ${GOOS_TARGET}/${GOARCH_TARGET}..."
 rm -rf "${WORK_DIR}"
-mkdir -p "${WORK_DIR}/bin" "${WORK_DIR}/scripts" "${WORK_DIR}/docs"
-GOCACHE="${GO_BUILD_CACHE}" CGO_ENABLED=0 GOOS="${GOOS_TARGET}" GOARCH="${GOARCH_TARGET}" \
-	go build -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o "${WORK_DIR}/bin/${APP_NAME}" ./cmd/server
+mkdir -p "${WORK_DIR}/bin" "${WORK_DIR}/scripts" "${WORK_DIR}/docs" "${WORK_DIR}/deploy/systemd"
+GOMAXPROCS="${BUILD_PROCS}" GOCACHE="${GO_BUILD_CACHE}" CGO_ENABLED=0 GOOS="${GOOS_TARGET}" GOARCH="${GOARCH_TARGET}" \
+	go build -p="${BUILD_PROCS}" -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o "${WORK_DIR}/bin/${APP_NAME}" ./cmd/server
+GOMAXPROCS="${BUILD_PROCS}" GOCACHE="${GO_BUILD_CACHE}" CGO_ENABLED=0 GOOS="${GOOS_TARGET}" GOARCH="${GOARCH_TARGET}" \
+	go build -p="${BUILD_PROCS}" -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o "${WORK_DIR}/bin/${AGENT_NAME}" ./cmd/agent
 
 info "复制安装脚本和文档..."
 install -m 0755 scripts/install-binary.sh "${WORK_DIR}/install-binary.sh"
 install -m 0755 scripts/uninstall.sh "${WORK_DIR}/uninstall.sh"
+install -m 0755 scripts/install-agent.sh "${WORK_DIR}/install-agent.sh"
+install -m 0755 scripts/uninstall-agent.sh "${WORK_DIR}/uninstall-agent.sh"
+install -m 0755 scripts/install-lib.sh "${WORK_DIR}/scripts/install-lib.sh"
 install -m 0755 scripts/healthcheck.sh "${WORK_DIR}/scripts/healthcheck.sh"
 install -m 0755 scripts/verify-package.sh "${WORK_DIR}/scripts/verify-package.sh"
+install -m 0755 scripts/integration-smoke.sh "${WORK_DIR}/scripts/integration-smoke.sh"
 cp README.md "${WORK_DIR}/README.md"
 cp CONTRIBUTING.md "${WORK_DIR}/CONTRIBUTING.md"
 cp docs/*.md "${WORK_DIR}/docs/"
-cp docker-compose.yml Dockerfile "${WORK_DIR}/"
+install -d -m 0755 "${WORK_DIR}/docs/images"
+cp -R docs/images/. "${WORK_DIR}/docs/images/"
+cp deploy/systemd/* "${WORK_DIR}/deploy/systemd/"
+cp docker-compose.yml Dockerfile Dockerfile.release docker-compose.release.yml "${WORK_DIR}/"
 
 cat >"${WORK_DIR}/VERSION" <<EOF
 APP_NAME=${APP_NAME}
@@ -77,4 +89,5 @@ info "目标机器使用:"
 info "  tar -xzf $(basename "${ARCHIVE}")"
 info "  cd $(basename "${WORK_DIR}")"
 info "  sudo bash install-binary.sh"
+info "Agent 目标机复制发布包后运行: sudo MANAGER_URL=http://中心端IP:33801 bash install-agent.sh"
 info "默认监听 0.0.0.0:33801；安装/卸载脚本不会执行 firewall-cmd，请按需在程序外手工放行端口"

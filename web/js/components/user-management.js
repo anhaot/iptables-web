@@ -66,7 +66,14 @@ const UserManagement = {
   async deleteUser(id) {
     const user = this.users.find(u => u.id === id);
     if (!user) return;
-    if (!confirm('确定要删除用户 "' + user.username + '" 吗？此操作不可撤销。')) return;
+    const accepted = await Dialogs.confirm({
+      title: '删除控制端用户',
+      message: '用户将无法继续登录当前控制端，此操作不可撤销。',
+      target: user.username + ' · 控制端 ' + window.location.host,
+      confirmText: '删除用户',
+      danger: true
+    });
+    if (!accepted) return;
     try {
       await api.deleteUser(id);
       Toasts.success('用户已删除');
@@ -154,8 +161,8 @@ const UserManagement = {
               <div class="form-group">
                 <label class="form-label">密码${isEdit ? ' (留空则不修改)' : ''}</label>
                 <input class="form-input" id="um-password" type="password" autocomplete="new-password"
-                       ${isEdit ? '' : 'required'} minlength="6"
-                       placeholder="至少 6 个字符">
+                       ${isEdit ? '' : 'required'} minlength="1" maxlength="128"
+                       placeholder="密码要求以管理员安全策略为准">
               </div>
               <div class="form-group">
                 <label class="form-label">角色</label>
@@ -188,11 +195,11 @@ const UserManagement = {
               </div>
               <div class="form-group">
                 <label class="form-label">新密码</label>
-                <input class="form-input" id="um-new-password" type="password" autocomplete="new-password" required minlength="6" placeholder="至少 6 个字符">
+                <input class="form-input" id="um-new-password" type="password" autocomplete="new-password" required minlength="1" maxlength="128" placeholder="密码要求以管理员安全策略为准">
               </div>
               <div class="form-group">
                 <label class="form-label">确认新密码</label>
-                <input class="form-input" id="um-confirm-password" type="password" autocomplete="new-password" required minlength="6" placeholder="再次输入新密码">
+                <input class="form-input" id="um-confirm-password" type="password" autocomplete="new-password" required minlength="1" maxlength="128" placeholder="再次输入新密码">
               </div>
               <div style="display:flex;gap:0.5rem;margin-top:1rem">
                 <button type="submit" class="btn btn-primary" style="flex:1">修改密码</button>

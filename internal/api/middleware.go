@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	appLog "iptables-web/internal/logging"
+	"iptables-web/internal/model"
 	"iptables-web/internal/store"
 )
 
@@ -20,11 +22,29 @@ const requestIDKey contextKey = "request_id"
 const sessionKey contextKey = "session"
 const apiKeyAuthKey contextKey = "api_key_auth"
 const authDisabledKey contextKey = "auth_disabled"
+const requestLogIdentityKey contextKey = "request_log_identity"
+const forwardedAuditIdentityKey contextKey = "forwarded_audit_identity"
+
+type forwardedAuditIdentity struct {
+	Actor    string
+	Role     string
+	RemoteIP string
+}
+
+type requestLogIdentity struct {
+	actor string
+}
+
+func setRequestLogActor(r *http.Request, actor string) {
+	if identity, ok := r.Context().Value(requestLogIdentityKey).(*requestLogIdentity); ok {
+		identity.actor = actor
+	}
+}
 
 func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
-		if id == "" {
+		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		if !validRequestID(id) {
 			id = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
 		ctx := context.WithValue(r.Context(), requestIDKey, id)
@@ -39,20 +59,28 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func validRequestID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune("-_.:", ch) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		wrapped := &responseWriter{ResponseWriter: w, status: 200}
+		identity := &requestLogIdentity{actor: "anonymous"}
+		r = r.WithContext(context.WithValue(r.Context(), requestLogIdentityKey, identity))
 		next.ServeHTTP(wrapped, r)
 		requestID, _ := r.Context().Value(requestIDKey).(string)
-		actor := "anonymous"
-		if sess, ok := r.Context().Value(sessionKey).(*store.Session); ok {
-			actor = sess.Username + "/" + sess.Role
-		} else if apiKey, _ := r.Context().Value(apiKeyAuthKey).(bool); apiKey {
-			actor = "api-key/admin"
-		} else if authDisabled, _ := r.Context().Value(authDisabledKey).(bool); authDisabled {
-			actor = "auth-disabled/admin"
-		}
+		actor := identity.actor
 		appLog.Infof("request_id=%s actor=%s remote_ip=%s method=%s path=%s status=%d duration=%s",
 			requestID, actor, remoteRequestIP(r.RemoteAddr), r.Method, r.URL.Path, wrapped.status, time.Since(start))
 	})
@@ -71,20 +99,26 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 }
 
 type authConfig struct {
-	enabled   bool
-	apiKey    string
-	userStore *store.UserStore
+	enabled     bool
+	apiKey      string
+	apiKeyStore *store.APIKeyStore
+	userStore   *store.UserStore
 }
 
-func newAuthConfig(userStore *store.UserStore) *authConfig {
+func newAuthConfig(userStore *store.UserStore, apiKeyStores ...*store.APIKeyStore) *authConfig {
 	authEnabled := true
 	if os.Getenv("AUTH_ENABLED") == "false" {
 		authEnabled = false
 	}
+	var apiKeyStore *store.APIKeyStore
+	if len(apiKeyStores) > 0 {
+		apiKeyStore = apiKeyStores[0]
+	}
 	return &authConfig{
-		enabled:   authEnabled,
-		apiKey:    os.Getenv("API_KEY"),
-		userStore: userStore,
+		enabled:     authEnabled,
+		apiKey:      os.Getenv("API_KEY"),
+		apiKeyStore: apiKeyStore,
+		userStore:   userStore,
 	}
 }
 
@@ -92,7 +126,7 @@ func authMiddleware(cfg *authConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Public endpoints — no auth required
-			if isPublicPath(r.URL.Path) {
+			if isPublicPath(r.URL.Path) || (r.Method == http.MethodPost && r.URL.Path == "/api/v1/agent-enrollments/register") {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -104,12 +138,14 @@ func authMiddleware(cfg *authConfig) func(http.Handler) http.Handler {
 					if sess, err := cfg.userStore.ValidateSession(token); err == nil {
 						ctx := context.WithValue(r.Context(), sessionKey, sess)
 						r = r.WithContext(ctx)
+						setRequestLogActor(r, sess.Username+"/"+sess.Role)
 					}
 				}
 			}
 
 			// Auth disabled — allow all (but session was attached if valid)
 			if !cfg.enabled {
+				setRequestLogActor(r, "auth-disabled/admin")
 				ctx := context.WithValue(r.Context(), authDisabledKey, true)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -120,7 +156,7 @@ func authMiddleware(cfg *authConfig) func(http.Handler) http.Handler {
 			// 1. Check session (already attached above)
 			if sess, ok := r.Context().Value(sessionKey).(*store.Session); ok {
 				if sess.MustChangePassword && !isPasswordChangeAllowedPath(r.URL.Path) {
-					respondError(w, http.StatusForbidden, "password_change_required", "首次登录必须修改密码")
+					respondError(w, http.StatusForbidden, "password_change_required", "首次登录或密码到期，必须先修改密码")
 					return
 				}
 				next.ServeHTTP(w, r)
@@ -128,13 +164,14 @@ func authMiddleware(cfg *authConfig) func(http.Handler) http.Handler {
 			}
 
 			// 2. Check API Key (backward compatible)
-			if cfg.apiKey != "" {
-				key := r.Header.Get("X-API-Key")
-				if key == cfg.apiKey {
-					ctx := context.WithValue(r.Context(), apiKeyAuthKey, true)
-					next.ServeHTTP(w, r.WithContext(ctx))
-					return
-				}
+			key := r.Header.Get("X-API-Key")
+			legacyKeyOK := cfg.apiKey != "" && subtle.ConstantTimeCompare([]byte(key), []byte(cfg.apiKey)) == 1
+			dynamicKeyOK := cfg.apiKeyStore != nil && cfg.apiKeyStore.Validate(key)
+			if key != "" && (legacyKeyOK || dynamicKeyOK) {
+				setRequestLogActor(r, "api-key/admin")
+				ctx := context.WithValue(r.Context(), apiKeyAuthKey, true)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
 			}
 
 			respondError(w, http.StatusUnauthorized, "unauthorized", "请先登录或提供有效的 API Key")
@@ -148,6 +185,7 @@ func isPublicPath(path string) bool {
 		"/api/v1/health",
 		"/api/v1/auth/login",
 		"/api/v1/auth/captcha",
+		"/api/v1/auth/policy",
 		"/",
 		"/index.html",
 		"/login.html",
@@ -189,6 +227,40 @@ func adminRequired() func(http.Handler) http.Handler {
 				return
 			}
 			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// localHostRequired protects controller-local firewall APIs. Administrators,
+// API keys and auth-disabled deployments retain access; ordinary users must be
+// explicitly assigned the stable local host ID.
+func localHostRequired() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if disabled, _ := r.Context().Value(authDisabledKey).(bool); disabled {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if apiKeyOK, _ := r.Context().Value(apiKeyAuthKey).(bool); apiKeyOK {
+				next.ServeHTTP(w, r)
+				return
+			}
+			sess, ok := r.Context().Value(sessionKey).(*store.Session)
+			if !ok {
+				respondError(w, http.StatusForbidden, "forbidden", "没有本机防火墙权限")
+				return
+			}
+			if sess.Role == "admin" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			for _, hostID := range sess.HostIDs {
+				if hostID == model.LocalHostID {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			respondError(w, http.StatusForbidden, "forbidden", "没有本机防火墙权限")
 		})
 	}
 }

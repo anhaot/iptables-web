@@ -9,23 +9,19 @@ import (
 	"iptables-web/internal/store"
 )
 
-func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *store.UserStore, webFS fs.FS) http.Handler {
+func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, hostH *HostHandler, enrollmentH *EnrollmentHandler, accessKeyH *AccessKeyHandler, userStore *store.UserStore, apiKeyStore *store.APIKeyStore, webFS fs.FS) http.Handler {
 	mux := http.NewServeMux()
-	authCfg := newAuthConfig(userStore)
+	authCfg := newAuthConfig(userStore, apiKeyStore)
 
 	// Strip the "web" directory prefix from embedded filesystem
 	webFS, _ = fs.Sub(webFS, "web")
 
 	var handler http.Handler = mux
-	handler = changeAuditMiddleware(h, userStore)(handler)
-	handler = recoveryMiddleware(handler)
-	handler = rateLimitMiddleware(600, time.Minute)(handler)
-	handler = loggingMiddleware(handler)
-	handler = requestIDMiddleware(handler)
-	handler = authMiddleware(authCfg)(handler)
+	handler = controllerMiddleware(handler, h, userStore, hostH.store, apiKeyStore, authCfg)
 
 	// Auth routes
 	mux.HandleFunc("/api/v1/auth/captcha", authH.GetCaptcha)
+	mux.HandleFunc("/api/v1/auth/policy", authH.GetPolicy)
 	mux.HandleFunc("/api/v1/auth/login", authH.Login)
 	mux.HandleFunc("/api/v1/auth/logout", authH.Logout)
 	mux.HandleFunc("/api/v1/auth/session", authH.SessionCheck)
@@ -33,22 +29,33 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 	// Self-service password change (any authenticated user)
 	mux.HandleFunc("/api/v1/auth/password", userH.ChangePassword)
 
-	// User management — all authenticated users can view, admin for mutations
+	// User inventory and host-assignment policy are controller-admin only.
 	adminOnly := adminRequired()
+	localOnly := localHostRequired()
 	usersHandler := func(w http.ResponseWriter, r *http.Request) {
 		id, action := extractUserPath(r.URL.Path)
-		// GET /api/v1/users (list) or /api/v1/users/{id} (single) — any authenticated user
+		// GET /api/v1/users (list) or /api/v1/users/{id} (single) — admin only
 		if r.Method == http.MethodGet {
-			if id == "" {
-				userH.ListUsers(w, r)
-				return
-			}
-			userH.GetUser(w, r)
+			adminOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if id == "" {
+					userH.ListUsers(w, r)
+					return
+				}
+				userH.GetUser(w, r)
+			})).ServeHTTP(w, r)
 			return
 		}
 		// POST /api/v1/users — admin only
 		if id == "" && action == "" && r.Method == http.MethodPost {
 			adminOnly(http.HandlerFunc(userH.CreateUser)).ServeHTTP(w, r)
+			return
+		}
+		if id != "" && action == "/reset-account" && r.Method == http.MethodPost {
+			adminOnly(http.HandlerFunc(userH.ResetAccount)).ServeHTTP(w, r)
+			return
+		}
+		if id != "" && action == "/unlock" && r.Method == http.MethodPost {
+			adminOnly(http.HandlerFunc(userH.UnlockAccount)).ServeHTTP(w, r)
 			return
 		}
 		// PUT/DELETE /api/v1/users/{id} — admin only
@@ -68,15 +75,41 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 	}
 	mux.HandleFunc("/api/v1/users", usersHandler)
 	mux.HandleFunc("/api/v1/users/", usersHandler)
+	mux.Handle("/api/v1/security-policy", adminOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			userH.GetSecurityPolicy(w, r)
+		case http.MethodPut:
+			userH.UpdateSecurityPolicy(w, r)
+		default:
+			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET or PUT")
+		}
+	})))
+
+	// Remote host inventory and explicitly allow-listed API forwarding.
+	mux.Handle("/api/v1/hosts", hostH)
+	mux.Handle("/api/v1/hosts/", hostH)
+
+	// Agents may only POST a signed request to /register without a browser
+	// session. Listing, approval and rejection remain controller-admin routes.
+	mux.Handle("/api/v1/agent-enrollments", adminOnly(enrollmentH))
+	mux.Handle("/api/v1/agent-enrollments/approve", adminOnly(enrollmentH))
+	mux.Handle("/api/v1/agent-enrollments/reject", adminOnly(enrollmentH))
+	mux.Handle("/api/v1/agent-enrollments/register", enrollmentH)
+
+	// API credentials for controller-to-agent authentication. Mutations take
+	// effect immediately; the plaintext credential is only returned on create.
+	mux.Handle("/api/v1/access-keys", accessKeyH)
+	mux.Handle("/api/v1/access-keys/", accessKeyH)
 
 	// API routes
 	mux.HandleFunc("/api/v1/health", h.HealthCheck)
 	mux.HandleFunc("/api/v1/rules", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			h.ListRules(w, r)
+			localOnly(http.HandlerFunc(h.ListRules)).ServeHTTP(w, r)
 		case http.MethodPost:
-			adminOnly(http.HandlerFunc(h.CreateRule)).ServeHTTP(w, r)
+			localOnly(http.HandlerFunc(h.CreateRule)).ServeHTTP(w, r)
 		default:
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET or POST")
 		}
@@ -86,7 +119,7 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use PUT")
 			return
 		}
-		adminOnly(http.HandlerFunc(h.ReorderRules)).ServeHTTP(w, r)
+		localOnly(http.HandlerFunc(h.ReorderRules)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/rules/", func(w http.ResponseWriter, r *http.Request) {
 		id, action := extractRulePath(r.URL.Path)
@@ -96,13 +129,13 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 		}
 		switch {
 		case action == "/toggle" && r.Method == http.MethodPost:
-			adminOnly(http.HandlerFunc(h.ToggleRule)).ServeHTTP(w, r)
+			localOnly(http.HandlerFunc(h.ToggleRule)).ServeHTTP(w, r)
 		case action == "" && r.Method == http.MethodGet:
-			h.GetRule(w, r)
+			localOnly(http.HandlerFunc(h.GetRule)).ServeHTTP(w, r)
 		case action == "" && r.Method == http.MethodPut:
-			adminOnly(http.HandlerFunc(h.UpdateRule)).ServeHTTP(w, r)
+			localOnly(http.HandlerFunc(h.UpdateRule)).ServeHTTP(w, r)
 		case action == "" && r.Method == http.MethodDelete:
-			adminOnly(http.HandlerFunc(h.DeleteRule)).ServeHTTP(w, r)
+			localOnly(http.HandlerFunc(h.DeleteRule)).ServeHTTP(w, r)
 		default:
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "invalid method")
 		}
@@ -112,14 +145,14 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
 			return
 		}
-		h.GetSystemInfo(w, r)
+		localOnly(http.HandlerFunc(h.GetSystemInfo)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/system/chains", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
 			return
 		}
-		h.GetChains(w, r)
+		localOnly(http.HandlerFunc(h.GetChains)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/system/chains/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -131,42 +164,44 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 			respondError(w, http.StatusNotFound, "not_found", "chain not found")
 			return
 		}
-		h.GetChainRules(w, r)
+		localOnly(http.HandlerFunc(h.GetChainRules)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/system/backup", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
 			return
 		}
-		adminOnly(http.HandlerFunc(h.BackupRules)).ServeHTTP(w, r)
+		localOnly(http.HandlerFunc(h.BackupRules)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/system/restore", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
 			return
 		}
-		adminOnly(http.HandlerFunc(h.RestoreRules)).ServeHTTP(w, r)
+		localOnly(http.HandlerFunc(h.RestoreRules)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/system/managed-rules", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use DELETE")
 			return
 		}
-		adminOnly(http.HandlerFunc(h.ClearManagedRules)).ServeHTTP(w, r)
+		localOnly(http.HandlerFunc(h.ClearManagedRules)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/system/audit", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
 			return
 		}
+		// The controller audit contains user, host and credential management
+		// events, so local-firewall access alone must not expose it.
 		adminOnly(http.HandlerFunc(h.GetAuditEvents)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/system/rollback", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			adminOnly(http.HandlerFunc(h.GetRollbackStatus)).ServeHTTP(w, r)
+			localOnly(http.HandlerFunc(h.GetRollbackStatus)).ServeHTTP(w, r)
 		case http.MethodPost:
-			adminOnly(http.HandlerFunc(h.RollbackLastChange)).ServeHTTP(w, r)
+			localOnly(http.HandlerFunc(h.RollbackLastChange)).ServeHTTP(w, r)
 		default:
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET or POST")
 		}
@@ -198,21 +233,21 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
 			return
 		}
-		h.GetDockerMappings(w, r)
+		localOnly(http.HandlerFunc(h.GetDockerMappings)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/docker/diagnostics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
 			return
 		}
-		h.GetDockerDiagnostics(w, r)
+		localOnly(http.HandlerFunc(h.GetDockerDiagnostics)).ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/api/v1/docker/whitelist", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
 			return
 		}
-		adminOnly(http.HandlerFunc(h.CreateDockerWhitelist)).ServeHTTP(w, r)
+		localOnly(http.HandlerFunc(h.CreateDockerWhitelist)).ServeHTTP(w, r)
 	})
 
 	// Serve embedded frontend
@@ -220,13 +255,13 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if path == "/" {
-			loginData, err := fs.ReadFile(webFS, "login.html")
+			landingData, err := fs.ReadFile(webFS, frontendLandingPage(authCfg.enabled))
 			if err != nil {
 				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write(loginData)
+			w.Write(landingData)
 			return
 		}
 		if path == "/index.html" {
@@ -258,6 +293,23 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, userStore *st
 	})
 
 	return handler
+}
+
+func controllerMiddleware(handler http.Handler, h *Handler, userStore *store.UserStore, hostStore *store.HostStore, apiKeyStore *store.APIKeyStore, authCfg *authConfig) http.Handler {
+	handler = changeAuditMiddleware(h, userStore, hostStore, apiKeyStore)(handler)
+	handler = authMiddleware(authCfg)(handler)
+	handler = rateLimitMiddleware(600, time.Minute)(handler)
+	handler = recoveryMiddleware(handler)
+	handler = loggingMiddleware(handler)
+	handler = requestIDMiddleware(handler)
+	return handler
+}
+
+func frontendLandingPage(authEnabled bool) string {
+	if authEnabled {
+		return "login.html"
+	}
+	return "index.html"
 }
 
 func extractRulePath(path string) (id string, action string) {

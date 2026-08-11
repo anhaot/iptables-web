@@ -5,19 +5,27 @@ const ChainsView = {
   loading: false,
   error: null,
   expanded: {},
+  refreshSerial: 0,
 
   async refresh() {
+    const serial = ++this.refreshSerial;
+    const context = AppState.captureHostContext();
     this.loading = true;
     this.error = null;
     this.render();
     try {
-      this.chains = await api.getChains('packet');
+      const chains = await api.getChains('packet', context.hostID);
+      if (serial !== this.refreshSerial || !AppState.isHostContextCurrent(context)) return;
+      this.chains = chains;
     } catch (e) {
+      if (serial !== this.refreshSerial || !AppState.isHostContextCurrent(context)) return;
       this.error = e.message;
       this.chains = [];
     } finally {
-      this.loading = false;
-      this.render();
+      if (serial === this.refreshSerial && AppState.isHostContextCurrent(context)) {
+        this.loading = false;
+        this.render();
+      }
     }
   },
 
@@ -47,12 +55,12 @@ const ChainsView = {
     }
     return this.chains.map(chain => `
       <div class="chain-card">
-        <div class="chain-card-header" onclick="ChainsView.toggleExpand('${escapeHtml(chain.name)}')" title="${escapeHtml(FirewallHelp.chainTitle(chain.name))}">
+        <button class="chain-card-header" type="button" aria-expanded="${!!this.expanded[chain.name]}" onclick="ChainsView.toggleExpand('${escapeHtml(chain.name)}')" title="${escapeHtml(FirewallHelp.chainTitle(chain.name))}">
           <span><strong>${escapeHtml(chain.name)}</strong><span class="help-dot" title="${escapeHtml(FirewallHelp.chainTitle(chain.name))}">?</span>
             <span style="color:var(--text-muted);margin-left:.5rem;font-size:.8rem">策略: ${escapeHtml(chain.policy || '—')} · ${chain.rules ? chain.rules.length : 0} 条规则</span>
           </span>
           <span style="color:var(--text-muted)">${this.expanded[chain.name] ? '▴' : '▾'}</span>
-        </div>
+        </button>
         ${this.expanded[chain.name] ? renderPacketChainBody(chain) : ''}
       </div>`).join('');
   }

@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILD_PROCS: "2"
     container_name: iptables-web
     # CRITICAL: Host networking is required so iptables commands inside the
     # container modify the HOST's network stack, not the container's isolated
@@ -24,19 +26,28 @@ services:
     environment:
       # Listen on all IPv4 interfaces. Keep authentication enabled and use
       # firewalld/security groups to restrict who can reach this port.
-      - LISTEN_ADDR=0.0.0.0:33801
+      - LISTEN_ADDR=${IPTABLES_WEB_LISTEN_ADDR:-0.0.0.0:33801}
       - RULES_FILE=/data/rules.json
       - USERS_FILE=/data/users.json
+      - HOSTS_FILE=/data/hosts.json
+      - API_KEYS_FILE=/data/api-keys.json
       - AUDIT_FILE=/data/audit.jsonl
       - ROLLBACK_FILE=/data/rollback.json
-      - LOG_LEVEL=info
-      - TZ=Asia/Shanghai
-      - AUTH_ENABLED=true
-      # Optional API key for script access. Web login uses the user system.
-      # - API_KEY=your-secure-api-key-here
+      - LOG_LEVEL=${IPTABLES_WEB_LOG_LEVEL:-info}
+      - TZ=${TZ:-Asia/Shanghai}
+      - AUTH_ENABLED=${IPTABLES_WEB_AUTH_ENABLED:-true}
+      - FIREWALL_BACKEND=${IPTABLES_WEB_FIREWALL_BACKEND:-auto}
+      - DEV_MODE=${IPTABLES_WEB_DEV_MODE:-false}
+      # Optional override. By default the controller creates /data/hosts.key
+      # automatically; if set, keep this value stable.
+      # - HOST_CREDENTIAL_KEY=replace-with-at-least-32-random-characters
+      # Create/revoke API access keys dynamically in the UI. Do not persist a
+      # plaintext legacy API_KEY in this file or the container environment.
     restart: unless-stopped
+    cpus: "1.0"
+    mem_limit: 512m
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:33801/api/v1/health"]
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 30s
       timeout: 10s
       retries: 3
