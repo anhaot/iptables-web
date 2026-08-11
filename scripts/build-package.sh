@@ -54,15 +54,13 @@ install -m 0755 scripts/install-agent.sh "${WORK_DIR}/install-agent.sh"
 install -m 0755 scripts/uninstall-agent.sh "${WORK_DIR}/uninstall-agent.sh"
 install -m 0755 scripts/install-lib.sh "${WORK_DIR}/scripts/install-lib.sh"
 install -m 0755 scripts/healthcheck.sh "${WORK_DIR}/scripts/healthcheck.sh"
-install -m 0755 scripts/verify-package.sh "${WORK_DIR}/scripts/verify-package.sh"
-install -m 0755 scripts/integration-smoke.sh "${WORK_DIR}/scripts/integration-smoke.sh"
 cp README.md "${WORK_DIR}/README.md"
 cp CONTRIBUTING.md "${WORK_DIR}/CONTRIBUTING.md"
 cp docs/*.md "${WORK_DIR}/docs/"
 install -d -m 0755 "${WORK_DIR}/docs/images"
 cp -R docs/images/. "${WORK_DIR}/docs/images/"
 cp deploy/systemd/* "${WORK_DIR}/deploy/systemd/"
-cp docker-compose.yml Dockerfile Dockerfile.release docker-compose.release.yml "${WORK_DIR}/"
+cp Dockerfile.release docker-compose.release.yml "${WORK_DIR}/"
 
 cat >"${WORK_DIR}/VERSION" <<EOF
 APP_NAME=${APP_NAME}

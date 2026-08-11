@@ -28,13 +28,26 @@ for required in \
 	'/docs/deployment.md' \
 	'/docs/images/dashboard.png' \
 	'/scripts/install-lib.sh' \
-	'/scripts/integration-smoke.sh' \
+	'/scripts/healthcheck.sh' \
 	'/Dockerfile.release' \
 	'/docker-compose.release.yml' \
 	'/deploy/systemd/iptables-web.service' \
 	'/deploy/systemd/iptables-web-agent.service' \
 	'/VERSION'; do
 	printf '%s\n' "${contents}" | grep -q "${required}$" || { echo "Package missing ${required}" >&2; exit 1; }
+done
+
+for forbidden in \
+	'/scripts/build-package.sh' \
+	'/scripts/verify-package.sh' \
+	'/scripts/integration-smoke.sh' \
+	'/scripts/ui-logic-test.js' \
+	'/Dockerfile' \
+	'/docker-compose.yml'; do
+	if printf '%s\n' "${contents}" | grep -q "${forbidden}$"; then
+		echo "Package contains source-only file ${forbidden}" >&2
+		exit 1
+	fi
 done
 
 tmp_dir="$(mktemp -d)"
@@ -46,7 +59,7 @@ agent_binary="${package_root}/bin/iptables-web-agent"
 
 bash -n "${package_root}/install-binary.sh" "${package_root}/install-agent.sh" \
 	"${package_root}/uninstall.sh" "${package_root}/uninstall-agent.sh" \
-	"${package_root}/scripts/install-lib.sh" "${package_root}/scripts/integration-smoke.sh"
+	"${package_root}/scripts/install-lib.sh" "${package_root}/scripts/healthcheck.sh"
 
 [ -x "${binary}" ] || { echo "Binary is not executable" >&2; exit 1; }
 [ -x "${agent_binary}" ] || { echo "Agent binary is not executable" >&2; exit 1; }
@@ -106,7 +119,6 @@ grep -q -- '--non-interactive' "${package_root}/install-agent.sh"
 grep -q 'AGENT_IDENTITY_FILE' "${package_root}/install-agent.sh"
 grep -q 'EnvironmentFile=' "${package_root}/install-agent.sh"
 grep -q 'EnvironmentFile=' "${package_root}/install-binary.sh"
-grep -q '/usr/local/bin/healthcheck.sh' "${package_root}/docker-compose.yml"
 grep -q '/usr/local/bin/healthcheck.sh' "${package_root}/docker-compose.release.yml"
 if grep -q '^Environment=API_KEY=' "${package_root}/install-binary.sh"; then echo "Installer writes plaintext API_KEY" >&2; exit 1; fi
 grep -q '正在恢复安装前状态' "${package_root}/install-binary.sh" || { echo "Controller installer lacks rollback" >&2; exit 1; }

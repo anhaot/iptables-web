@@ -168,15 +168,7 @@ sudo ss -lntp | grep ':33801'
 make integration-test
 ```
 
-发布包无需 Go，可直接指定其中的预编译二进制：
-
-```bash
-CONTROLLER_BINARY="$PWD/bin/iptables-web" \
-AGENT_BINARY="$PWD/bin/iptables-web-agent" \
-bash scripts/integration-smoke.sh
-```
-
-该脚本强制使用开发后端和回环监听，验证主动申请、批准、受保护回连、Agent 无页面边界、远程规则增删、审计以及密钥落盘检查，不会执行系统防火墙命令。
+该脚本强制使用开发后端和回环监听，验证主动申请、批准、受保护回连、Agent 无页面边界、远程规则增删、审计以及密钥落盘检查，不会执行系统防火墙命令。它属于源码仓库的开发验证工具，不进入面向目标机的 Release 压缩包；正式包由发布工作流在上传前执行同等构建与离线校验。
 
 ## 4. 从源码部署中心端
 
@@ -551,7 +543,7 @@ docker compose -f docker-compose.release.yml logs --tail=100 iptables-web
 curl --fail http://127.0.0.1:33801/api/v1/health
 ```
 
-不要用发布包里的源码 `Dockerfile` 构建：发布包不包含完整 Go 源码；应使用 `Dockerfile.release` / `docker-compose.release.yml`。
+发布包不包含完整 Go 源码及源码构建用 `Dockerfile`/`docker-compose.yml`，只提供面向预编译二进制的 `Dockerfile.release` / `docker-compose.release.yml`。
 
 ### 9.3 Docker 端口发现
 
