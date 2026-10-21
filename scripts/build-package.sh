@@ -17,6 +17,7 @@ info() { echo "[INFO] $1"; }
 error() { echo "[ERROR] $1" >&2; exit 1; }
 
 command -v go >/dev/null 2>&1 || error "构建预编译包需要 Go。目标机器安装时不需要 Go。"
+command -v python3 >/dev/null 2>&1 || error "构建前文档与公开文件检查需要 Python 3。目标机器安装时不需要 Python。"
 [[ "${BUILD_PROCS}" =~ ^[1-9][0-9]*$ ]] || error "BUILD_PROCS 必须是正整数"
 
 GO_VERSION="$(go env GOVERSION)"
@@ -25,6 +26,9 @@ GO_MINOR="$(printf '%s' "${GO_VERSION}" | sed -n 's/^go1\.\([0-9][0-9]*\).*/\1/p
 	error "正式包必须使用 Go 1.26 或更高版本构建，当前为 ${GO_VERSION}"
 
 cd "${ROOT_DIR}"
+
+info "检查公开文件边界与文档链接..."
+python3 scripts/check-source.py
 
 info "同步嵌入前端资源..."
 rm -rf assets/web
@@ -53,14 +57,18 @@ install -m 0755 scripts/uninstall.sh "${WORK_DIR}/uninstall.sh"
 install -m 0755 scripts/install-agent.sh "${WORK_DIR}/install-agent.sh"
 install -m 0755 scripts/uninstall-agent.sh "${WORK_DIR}/uninstall-agent.sh"
 install -m 0755 scripts/install-lib.sh "${WORK_DIR}/scripts/install-lib.sh"
-install -m 0755 scripts/healthcheck.sh "${WORK_DIR}/scripts/healthcheck.sh"
 cp README.md "${WORK_DIR}/README.md"
 cp CONTRIBUTING.md "${WORK_DIR}/CONTRIBUTING.md"
-cp docs/*.md "${WORK_DIR}/docs/"
+cp LICENSE "${WORK_DIR}/LICENSE"
+for document in docs/index.md docs/deployment.md docs/multi-host.md \
+	docs/operations.md docs/api.md docs/architecture.md docs/roadmap.md \
+	docs/development-handoff.md docs/open-source.md; do
+	# Explicit allowlist: new local notes must never enter a release implicitly.
+	cp "${document}" "${WORK_DIR}/docs/"
+done
 install -d -m 0755 "${WORK_DIR}/docs/images"
 cp -R docs/images/. "${WORK_DIR}/docs/images/"
 cp deploy/systemd/* "${WORK_DIR}/deploy/systemd/"
-cp Dockerfile.release docker-compose.release.yml "${WORK_DIR}/"
 
 cat >"${WORK_DIR}/VERSION" <<EOF
 APP_NAME=${APP_NAME}

@@ -8,6 +8,7 @@ const FleetOverview = {
   ruleDetailSerials: {},
   refreshSerial: 0,
   probing: false,
+ searchQuery: '',
 
   async refresh() {
     const serial = ++this.refreshSerial;
@@ -44,7 +45,7 @@ const FleetOverview = {
     const now = Date.now();
     const hosts = AppState.hosts.filter(host => {
       const status = this.statuses[host.id] || AppState.hostStatuses[host.id] || {};
-      return host.enabled && agentHeartbeatState(host).state !== 'offline' && (!status.checkedAt || now - status.checkedAt > 60000);
+      return host.enabled && agentHeartbeatState(host).state !== 'offline' && (!status.checkedAt || now - status.checkedAt > effectiveHostMonitoring(host).probe_interval_seconds * 1000);
     });
     let cursor = 0;
     try {
@@ -55,7 +56,7 @@ const FleetOverview = {
           this.renderHostStatus(host.id);
           try {
             const result = await api.probeHost(host.id);
-            this.statuses[host.id] = { online: true, latency: Number(result.latency_ms || 0), checkedAt: Date.now() };
+            this.statuses[host.id] = { online: true, latency: Number(result.latency_ms || 0), checkedAt: Date.parse(result.checked_at) || Date.now() };
           } catch (error) {
             this.statuses[host.id] = { online: false, error: error.message, checkedAt: Date.now() };
           }
@@ -130,15 +131,31 @@ const FleetOverview = {
     if (!root) return;
     root.innerHTML = `<div id="fleet-summary" class="card-grid fleet-summary">${this.summaryCards(this.summaryCounts())}</div>
       <div class="card fleet-hosts-card">
-        <div class="card-header"><div><h3>纳管主机</h3><small>每台主机默认收起；展开后可预览规则并进入完整配置。</small></div><div class="btn-group"><button class="btn btn-sm btn-secondary" onclick="FleetOverview.refresh()">刷新状态</button>${AppState.canManageFleet() ? '<button class="btn btn-sm btn-primary" onclick="AppState.navigate(\'hosts\')">纳管 Agent</button>' : ''}</div></div>
-        ${this.loading ? '<div class="loading-spinner"><div class="spinner"></div> 加载主机...</div>' : this.renderHosts(AppState.hosts)}
+        <div class="card-header fleet-hosts-header"><div class="fleet-hosts-title"><h3>纳管主机</h3><small>每台主机默认收起；展开后可预览规则并进入完整配置。</small></div><div class="toolbar fleet-host-actions"><input class="search-input" type="search" aria-label="搜索纳管主机" placeholder="搜索名称、IP、分组或 Agent ID" value="${escapeHtml(this.searchQuery)}" oninput="FleetOverview.setSearch(this.value)"><span id="fleet-search-count"></span><div class="btn-group"><button class="btn btn-sm btn-secondary" onclick="FleetOverview.refresh()">刷新状态</button>${AppState.canManageFleet() ? '<button class="btn btn-sm btn-primary" onclick="AppState.navigate(\'hosts\')">纳管 Agent</button>' : ''}</div></div></div>
+ <div id="fleet-host-results">${this.loading ? '<div class="loading-spinner"><div class="spinner"></div> 加载主机...</div>' : this.renderHosts(AppState.hosts)}</div>
       </div>`;
+    this.updateSearchCount();
+  },
+
+  setSearch(value) {
+    this.searchQuery = String(value || '');
+    const list = document.getElementById('fleet-host-results');
+    if (list) list.innerHTML = this.renderHosts(AppState.hosts);
+    this.updateSearchCount();
+  },
+
+  updateSearchCount() {
+    const count = document.getElementById('fleet-search-count');
+    if (count) count.textContent = `显示 ${this.visibleHostCount || 0} / ${this.summaryCounts().total} 台`;
   },
 
   renderHosts(hosts) {
     const rows = [];
-    if (AppState.canAccessLocal()) rows.push(this.renderLocalRow());
-    hosts.forEach(host => rows.push(this.renderRemoteRow(host)));
+    const local = { name: '本机防火墙', group: '管理中心', base_url: typeof location !== 'undefined' ? location.origin : '', agent_id: 'local' };
+    if (AppState.canAccessLocal() && fleetHostMatches(local, this.searchQuery)) rows.push(this.renderLocalRow());
+    hosts.filter(host => fleetHostMatches(host, this.searchQuery)).forEach(host => rows.push(this.renderRemoteRow(host)));
+    this.visibleHostCount = rows.length;
+    if (!rows.length && this.searchQuery.trim()) return '<div class="empty-state"><h3>没有匹配的主机</h3><p>试试名称、IP 或分组，或清空搜索条件。</p><button class="btn btn-secondary" onclick="FleetOverview.searchQuery=\'\';FleetOverview.render()">清空搜索</button></div>';
     if (!rows.length) return '<div class="empty-state"><h3>当前没有可管理的主机</h3><p>请联系管理员为你的账号分配主机或主机组。</p></div>';
     return `<div class="fleet-host-list">${rows.join('')}</div>`;
   },
@@ -182,7 +199,7 @@ const FleetOverview = {
     return `<div class="fleet-host-detail">
       <div class="fleet-host-detail-header">
         <div class="fleet-host-detail-title"><span>主机详情</span><h4>${escapeHtml(hostName)}</h4><p>${description}</p></div>
-        <div class="fleet-host-actions">
+        <div class="toolbar fleet-host-actions">
           <button class="btn btn-sm btn-secondary" type="button" ${canOpen ? '' : 'disabled'} ${local ? '' : `data-fleet-open="${id}"`} onclick="${local ? "AppState.openLocal('dashboard')" : `AppState.openHost('${id}','dashboard')`}">进入主机概览</button>
           <button class="btn btn-sm btn-primary" type="button" ${canOpen ? '' : 'disabled'} ${local ? '' : `data-fleet-open="${id}"`} onclick="${local ? "AppState.openLocal('rules')" : `AppState.openHost('${id}','rules')`}">管理防火墙规则</button>
         </div>
@@ -304,3 +321,10 @@ function fleetHostFact(label, value, note, title, valueID, noteID) {
   const noteIDAttr = noteID ? ` id="${noteID}"` : '';
   return `<div class="fleet-host-fact"><dt>${escapeHtml(label)}</dt><dd class="fleet-host-fact-value"${valueIDAttr}${titleAttr}>${escapeHtml(value)}</dd><dd class="fleet-host-fact-note"${noteIDAttr}>${escapeHtml(note)}</dd></div>`;
 }
+
+function fleetHostMatches(host, query) {
+ const text = [host.name, host.group, host.base_url, host.agent_id].map(value => String(value || '').toLowerCase()).join(' ');
+ return String(query || '').trim().toLowerCase().split(/\s+/).filter(Boolean).every(term => text.includes(term));
+}
+
+if (typeof module !== 'undefined' && module.exports) module.exports = { fleetHostMatches };

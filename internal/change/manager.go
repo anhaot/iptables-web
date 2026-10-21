@@ -42,22 +42,24 @@ type AccessKeyChange struct {
 }
 
 type AuditEvent struct {
-	ID                   string                     `json:"id"`
-	CreatedAt            time.Time                  `json:"created_at"`
-	RequestID            string                     `json:"request_id,omitempty"`
-	Actor                string                     `json:"actor"`
-	Role                 string                     `json:"role,omitempty"`
-	RemoteIP             string                     `json:"remote_ip,omitempty"`
-	Method               string                     `json:"method"`
-	Path                 string                     `json:"path"`
-	Action               string                     `json:"action"`
-	Status               int                        `json:"status"`
-	RuleChanges          []RuleChange               `json:"rule_changes,omitempty"`
-	UserChanges          []UserChange               `json:"user_changes,omitempty"`
-	HostChanges          []HostChange               `json:"host_changes,omitempty"`
-	AccessKeyChanges     []AccessKeyChange          `json:"access_key_changes,omitempty"`
-	SecurityPolicyBefore *model.AdminSecurityPolicy `json:"security_policy_before,omitempty"`
-	SecurityPolicyAfter  *model.AdminSecurityPolicy `json:"security_policy_after,omitempty"`
+	ID                     string                     `json:"id"`
+	CreatedAt              time.Time                  `json:"created_at"`
+	RequestID              string                     `json:"request_id,omitempty"`
+	Actor                  string                     `json:"actor"`
+	Role                   string                     `json:"role,omitempty"`
+	RemoteIP               string                     `json:"remote_ip,omitempty"`
+	Method                 string                     `json:"method"`
+	Path                   string                     `json:"path"`
+	Action                 string                     `json:"action"`
+	Status                 int                        `json:"status"`
+	RuleChanges            []RuleChange               `json:"rule_changes,omitempty"`
+	UserChanges            []UserChange               `json:"user_changes,omitempty"`
+	HostChanges            []HostChange               `json:"host_changes,omitempty"`
+	AccessKeyChanges       []AccessKeyChange          `json:"access_key_changes,omitempty"`
+	MonitoringPolicyBefore *model.MonitoringPolicy    `json:"monitoring_policy_before,omitempty"`
+	MonitoringPolicyAfter  *model.MonitoringPolicy    `json:"monitoring_policy_after,omitempty"`
+	SecurityPolicyBefore   *model.AdminSecurityPolicy `json:"security_policy_before,omitempty"`
+	SecurityPolicyAfter    *model.AdminSecurityPolicy `json:"security_policy_after,omitempty"`
 }
 
 type RollbackState struct {
@@ -207,6 +209,16 @@ func (m *Manager) RollbackStatus() (*RollbackState, error) {
 	}
 	if time.Now().After(state.ExpiresAt) {
 		return nil, nil
+	}
+	seen := make(map[string]bool, len(state.Rules))
+	for _, rule := range state.Rules {
+		if rule == nil || rule.ID == "" || seen[rule.ID] {
+			return nil, fmt.Errorf("rollback contains a null rule or an empty/duplicate rule id")
+		}
+		seen[rule.ID] = true
+		if err := rule.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid rollback rule %s: %w", rule.ID, err)
+		}
 	}
 	state.Rules = cloneRules(state.Rules)
 	return &state, nil

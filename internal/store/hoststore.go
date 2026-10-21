@@ -95,6 +95,9 @@ func (s *HostStore) Load() error {
 		if host == nil || host.ID == "" || seen[host.ID] {
 			return fmt.Errorf("hosts file contains an invalid or duplicate host id")
 		}
+		if err := model.ValidateMonitoringOverrides(host.ProbeIntervalSeconds, host.OfflineAfterSeconds); err != nil {
+			return fmt.Errorf("invalid monitoring settings for host %s: %w", host.ID, err)
+		}
 		seen[host.ID] = true
 		if host.AgentID != "" {
 			if seenAgents[host.AgentID] {
@@ -125,6 +128,9 @@ func (s *HostStore) MarkAgentSeen(agentID string, seenAt time.Time) error {
 			continue
 		}
 		seenAt = seenAt.UTC()
+		if host.AgentLastSeenAt != nil && !seenAt.After(*host.AgentLastSeenAt) {
+			return nil
+		}
 		host.AgentLastSeenAt = &seenAt
 		lastSaved := s.lastSeenSaved[host.ID]
 		if !lastSaved.IsZero() && seenAt.Sub(lastSaved) < time.Minute {
@@ -196,6 +202,9 @@ func (s *HostStore) GetWithAPIKey(id string) (*model.ManagedHost, string, error)
 }
 
 func (s *HostStore) Create(host *model.ManagedHost, apiKey string) error {
+	if err := model.ValidateMonitoringOverrides(host.ProbeIntervalSeconds, host.OfflineAfterSeconds); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureKeyLocked(true); err != nil {
@@ -231,12 +240,30 @@ func (s *HostStore) Create(host *model.ManagedHost, apiKey string) error {
 	return nil
 }
 
+// UpdateMetadata rejects stale connection settings while preserving the latest
+// signed heartbeat. Browser metadata edits must never revert an approved address.
+func (s *HostStore) UpdateMetadata(expected, host *model.ManagedHost) error {
+	return s.update(host, "", expected)
+}
+
 func (s *HostStore) Update(host *model.ManagedHost, newAPIKey string) error {
+	return s.update(host, newAPIKey, nil)
+}
+
+func (s *HostStore) update(host *model.ManagedHost, newAPIKey string, expected *model.ManagedHost) error {
+	if err := model.ValidateMonitoringOverrides(host.ProbeIntervalSeconds, host.OfflineAfterSeconds); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, existing := range s.hosts {
 		if existing.ID != host.ID {
 			continue
+		}
+		if expected != nil && (expected.ID != host.ID || existing.BaseURL != expected.BaseURL ||
+			existing.CAPEM != expected.CAPEM || existing.AgentID != expected.AgentID ||
+			existing.AgentPublicKey != expected.AgentPublicKey || existing.APIKeyCipher != expected.APIKeyCipher) {
+			return fmt.Errorf("Agent connection changed while editing; refresh and retry")
 		}
 		for j, other := range s.hosts {
 			if i != j && strings.EqualFold(other.Name, host.Name) {
@@ -250,7 +277,7 @@ func (s *HostStore) Update(host *model.ManagedHost, newAPIKey string) error {
 		updated.CreatedAt = existing.CreatedAt
 		updated.UpdatedAt = time.Now()
 		updated.APIKeyCipher = existing.APIKeyCipher
-		if updated.AgentLastSeenAt == nil {
+		if existing.AgentLastSeenAt != nil && (updated.AgentLastSeenAt == nil || existing.AgentLastSeenAt.After(*updated.AgentLastSeenAt)) {
 			updated.AgentLastSeenAt = cloneTimePointer(existing.AgentLastSeenAt)
 		}
 		if strings.TrimSpace(newAPIKey) != "" {
@@ -271,6 +298,41 @@ func (s *HostStore) Update(host *model.ManagedHost, newAPIKey string) error {
 		return nil
 	}
 	return fmt.Errorf("host %s not found", host.ID)
+}
+
+// UpdateAgentConnection commits a verified endpoint and credential while
+// preserving administrator metadata changed during the network probe.
+func (s *HostStore) UpdateAgentConnection(expected *model.ManagedHost, baseURL, caPEM, newAPIKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expected == nil || strings.TrimSpace(newAPIKey) == "" {
+		return fmt.Errorf("Agent identity and new key are required")
+	}
+	for i, existing := range s.hosts {
+		if existing.ID != expected.ID {
+			continue
+		}
+		if existing.AgentID != expected.AgentID || existing.AgentPublicKey != expected.AgentPublicKey ||
+			existing.BaseURL != expected.BaseURL || existing.CAPEM != expected.CAPEM || existing.APIKeyCipher != expected.APIKeyCipher {
+			return fmt.Errorf("Agent identity or endpoint changed during verification; retry registration")
+		}
+		ciphertext, err := s.encryptLocked(newAPIKey)
+		if err != nil {
+			return err
+		}
+		updated := cloneHost(existing)
+		updated.BaseURL = baseURL
+		updated.CAPEM = caPEM
+		updated.APIKeyCipher = ciphertext
+		updated.UpdatedAt = time.Now()
+		s.hosts[i] = updated
+		if err := s.saveLocked(); err != nil {
+			s.hosts[i] = existing
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("host %s not found", expected.ID)
 }
 
 func (s *HostStore) Delete(id string) error {

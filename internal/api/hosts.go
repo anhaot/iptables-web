@@ -26,18 +26,24 @@ const (
 var hostIDPattern = regexp.MustCompile(`^[a-f0-9]{24}$`)
 
 type HostHandler struct {
-	store  *store.HostStore
-	users  *store.UserStore
-	client *fleet.Client
+	store        *store.HostStore
+	users        *store.UserStore
+	client       *fleet.Client
+	monitoring   *store.MonitoringStore
+	probeMu      sync.Mutex
+	monitoringMu sync.Mutex
+	probes       map[string]*hostProbe
 }
 
 type hostRequest struct {
-	Name    string `json:"name"`
-	Group   string `json:"group"`
-	BaseURL string `json:"base_url"`
-	CAPEM   string `json:"ca_pem"`
-	ClearCA bool   `json:"clear_ca,omitempty"`
-	Enabled *bool  `json:"enabled,omitempty"`
+	Name                 string `json:"name"`
+	Group                string `json:"group"`
+	BaseURL              string `json:"base_url"`
+	CAPEM                string `json:"ca_pem"`
+	ClearCA              bool   `json:"clear_ca,omitempty"`
+	Enabled              *bool  `json:"enabled,omitempty"`
+	ProbeIntervalSeconds *int   `json:"probe_interval_seconds,omitempty"`
+	OfflineAfterSeconds  *int   `json:"offline_after_seconds,omitempty"`
 }
 
 func NewHostHandler(hostStore *store.HostStore, userStores ...*store.UserStore) *HostHandler {
@@ -45,7 +51,7 @@ func NewHostHandler(hostStore *store.HostStore, userStores ...*store.UserStore) 
 	if len(userStores) > 0 {
 		users = userStores[0]
 	}
-	return &HostHandler{store: hostStore, users: users, client: fleet.NewClient(20 * time.Second)}
+	return &HostHandler{store: hostStore, users: users, client: fleet.NewClient(20 * time.Second), monitoring: store.NewMonitoringStore(""), probes: make(map[string]*hostProbe)}
 }
 
 func (h *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +147,14 @@ func (h *HostHandler) updateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.BaseURL = existing.BaseURL
+	if req.ProbeIntervalSeconds == nil {
+		value := existing.ProbeIntervalSeconds
+		req.ProbeIntervalSeconds = &value
+	}
+	if req.OfflineAfterSeconds == nil {
+		value := existing.OfflineAfterSeconds
+		req.OfflineAfterSeconds = &value
+	}
 	if strings.TrimSpace(req.CAPEM) == "" && existing.CAPEM != "" && !req.ClearCA {
 		req.CAPEM = existing.CAPEM
 	}
@@ -153,7 +167,7 @@ func (h *HostHandler) updateHost(w http.ResponseWriter, r *http.Request) {
 	host.AgentID = existing.AgentID
 	host.AgentPublicKey = existing.AgentPublicKey
 	host.AgentLastSeenAt = existing.AgentLastSeenAt
-	if err := h.store.Update(host, ""); err != nil {
+	if err := h.store.UpdateMetadata(existing, host); err != nil {
 		respondError(w, http.StatusBadRequest, "host_store_error", err.Error())
 		return
 	}
@@ -171,6 +185,9 @@ func (h *HostHandler) deleteHost(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "not_found", err.Error())
 		return
 	}
+	h.probeMu.Lock()
+	delete(h.probes, id)
+	h.probeMu.Unlock()
 	if h.users != nil {
 		// The host has already been deleted at this point. A stale assignment is
 		// harmless (all access checks also require a live host), so do not turn a
@@ -280,33 +297,17 @@ func (h *HostHandler) validatedHost(req hostRequest, id string) (*model.ManagedH
 			return nil, fmt.Errorf("generate host ID: %w", err)
 		}
 	}
-	return &model.ManagedHost{ID: id, Name: req.Name, Group: req.Group, BaseURL: strings.TrimRight(parsed.String(), "/"), CAPEM: strings.TrimSpace(req.CAPEM), Enabled: enabled}, nil
-}
-
-func (h *HostHandler) probeHost(w http.ResponseWriter, r *http.Request, id string) {
-	host, key, err := h.store.GetWithAPIKey(id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "not_found", err.Error())
-		return
+	host := &model.ManagedHost{ID: id, Name: req.Name, Group: req.Group, BaseURL: strings.TrimRight(parsed.String(), "/"), CAPEM: strings.TrimSpace(req.CAPEM), Enabled: enabled}
+	if req.ProbeIntervalSeconds != nil {
+		host.ProbeIntervalSeconds = *req.ProbeIntervalSeconds
 	}
-	started := time.Now()
-	// Use a protected endpoint so a successful probe verifies both network
-	// reachability and the configured remote access key.
-	resp, err := h.client.Do(r.Context(), host, key, http.MethodGet, "/api/v1/system/status", "", nil, "")
-	if err != nil {
-		respondError(w, http.StatusBadGateway, "remote_unreachable", err.Error())
-		return
+	if req.OfflineAfterSeconds != nil {
+		host.OfflineAfterSeconds = *req.OfflineAfterSeconds
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respondError(w, http.StatusBadGateway, "remote_unhealthy", fmt.Sprintf("remote authentication/status check returned HTTP %d", resp.StatusCode))
-		return
+	if err := model.ValidateMonitoringOverrides(host.ProbeIntervalSeconds, host.OfflineAfterSeconds); err != nil {
+		return nil, err
 	}
-	var health APIResponse
-	if err := json.Unmarshal(resp.Body, &health); err != nil || !health.Success {
-		respondError(w, http.StatusBadGateway, "remote_invalid_response", "remote status response is invalid")
-		return
-	}
-	respondOK(w, map[string]interface{}{"online": true, "latency_ms": time.Since(started).Milliseconds(), "health": health.Data})
+	return host, nil
 }
 
 func (h *HostHandler) proxyHost(w http.ResponseWriter, r *http.Request, id, remotePath string) {
@@ -334,6 +335,12 @@ func (h *HostHandler) proxyHost(w http.ResponseWriter, r *http.Request, id, remo
 	// login token and redirect to the login page.
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		respondError(w, http.StatusBadGateway, "remote_auth_failed", "remote host rejected its configured API key")
+		return
+	}
+	if r.Method == http.MethodPost &&
+		(remotePath == "/api/v1/docker/whitelist/batch" || remotePath == "/api/v1/rules/batch-delete") &&
+		(resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) {
+		respondError(w, http.StatusConflict, "agent_upgrade_required", "目标 Agent 不支持批量操作，请使用完整发布包升级该主机的 Agent 后重试")
 		return
 	}
 	copyRemoteHeader(w.Header(), resp.Header, "Content-Type", "Content-Disposition")
@@ -365,10 +372,9 @@ func (h *HostHandler) batchCreateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seen := make(map[string]bool, len(req.HostIDs))
-	results := make([]batchRuleResult, len(req.HostIDs))
-	sem := make(chan struct{}, 5)
-	var wg sync.WaitGroup
-	for i, id := range req.HostIDs {
+	// Validate the entire batch before starting any remote mutation. An invalid
+	// later item must not leave earlier hosts changed behind a 400/403 response.
+	for _, id := range req.HostIDs {
 		if !hostIDPattern.MatchString(id) || seen[id] {
 			respondError(w, http.StatusBadRequest, "validation_error", "host_ids contain an invalid or duplicate id")
 			return
@@ -378,6 +384,11 @@ func (h *HostHandler) batchCreateRule(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusForbidden, "host_forbidden", "one or more hosts are outside the user's authorization scope")
 			return
 		}
+	}
+	results := make([]batchRuleResult, len(req.HostIDs))
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+	for i, id := range req.HostIDs {
 		wg.Add(1)
 		go func(index int, hostID string) {
 			defer wg.Done()
@@ -446,6 +457,9 @@ func allowedRemoteOperation(method, path string) bool {
 	}
 	if path == "/api/v1/rules" {
 		return method == http.MethodGet || method == http.MethodPost
+	}
+	if path == "/api/v1/rules/batch-delete" || path == "/api/v1/docker/whitelist/batch" {
+		return method == http.MethodPost
 	}
 	if path == "/api/v1/rules/reorder" {
 		return method == http.MethodPut

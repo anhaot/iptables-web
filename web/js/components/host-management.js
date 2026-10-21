@@ -34,7 +34,12 @@ const HostManagement = {
     void this.probeAll(true, false);
   },
 
-  edit(id) {
+  openSettings(id) {
+ this.editing = AppState.hosts.find(host => host.id === id) || null;
+ AppState.navigate('hosts');
+ },
+
+ edit(id) {
     this.editing = this.hosts.find(host => host.id === id) || null;
     this.render();
   },
@@ -50,7 +55,9 @@ const HostManagement = {
       group: String(data.get('group') || '').trim(),
       ca_pem: usesHTTPS ? String(data.get('ca_pem') || '').trim() : '',
       clear_ca: usesHTTPS && data.get('clear_ca') === 'on',
-      enabled: data.get('enabled') === 'on'
+      enabled: data.get('enabled') === 'on',
+ probe_interval_seconds: Number(data.get('probe_interval_seconds')),
+ offline_after_seconds: Number(data.get('offline_after_seconds'))
     };
     try {
       if (!this.editing) throw new Error('只能编辑已完成纳管的 Agent');
@@ -189,13 +196,13 @@ const HostManagement = {
     }
     this.probingAll = true;
     const now = Date.now();
-    const hosts = this.hosts.filter(host => host.enabled && hostStatusPresentation(host, this.statuses[host.id] || {}).kind !== 'offline' && (force || !this.statuses[host.id]?.checkedAt || now - this.statuses[host.id].checkedAt > 60000));
+    const hosts = this.hosts.filter(host => host.enabled && (force || hostStatusPresentation(host, this.statuses[host.id] || {}).kind !== 'offline') && (force || !this.statuses[host.id]?.checkedAt || now - this.statuses[host.id].checkedAt > effectiveHostMonitoring(host).probe_interval_seconds * 1000));
     let cursor = 0;
     try {
       const workers = Array.from({ length: Math.min(this.probeConcurrency, hosts.length) }, async () => {
         while (cursor < hosts.length) {
           const host = hosts[cursor++];
-          await this.probe(host.id, quiet);
+          await this.probe(host.id, quiet, !!force);
         }
       });
       await Promise.all(workers);
@@ -219,7 +226,7 @@ const HostManagement = {
     else this.activeProbes = Math.max(0, this.activeProbes - 1);
   },
 
-  async probe(id, quiet) {
+  async probe(id, quiet, force = !quiet) {
     if (this.statuses[id]?.loading || this.statuses[id]?.queued) return;
     const queuedStatus = { ...(this.statuses[id] || {}), queued: true, loading: false };
     this.statuses[id] = queuedStatus;
@@ -232,11 +239,11 @@ const HostManagement = {
     AppState.setHostStatus(id, loadingStatus);
     this.renderStatus(id);
     try {
-      const result = await api.probeHost(id);
-      this.statuses[id] = { online: true, latency: Number(result.latency_ms || 0), checkedAt: Date.now() };
+      const result = await api.probeHost(id, force);
+      this.statuses[id] = { online: true, latency: Number(result.latency_ms || 0), checkedAt: Date.parse(result.checked_at) || Date.now() };
       if (!quiet) Toasts.success('远程主机连接正常');
     } catch (e) {
-      this.statuses[id] = { online: false, error: e.message, checkedAt: Date.now() };
+      this.statuses[id] = { online: false, error: e.message, checkedAt: Date.parse(result.checked_at) || Date.now() };
       if (!quiet) Toasts.error('连接失败，请查看诊断详情');
     } finally {
       this.releaseProbeSlot();
@@ -281,7 +288,7 @@ const HostManagement = {
     const installCommand = escapeHtml(this.installCommand());
     root.innerHTML = `
       <div class="agent-onboarding"><div><span class="agent-step">目标主机</span><strong>运行安装脚本</strong><small>部署轻量二进制与 systemd 服务</small></div><span class="agent-arrow">→</span><div><span class="agent-step">Agent 主动发起</span><strong>签名纳管申请</strong><small>不需要在管理端手工填写地址或密钥</small></div><span class="agent-arrow">→</span><div><span class="agent-step">当前中心</span><strong>单台或批量确认</strong><small>回连验证成功后加入纳管清单</small></div></div>
-      ${canManage ? `<div class="agent-install-card"><div><strong>目标机安装命令</strong><small>直接运行 <code>sudo bash install-agent.sh</code> 即可进入交互安装；右侧命令用于直接安装。Agent 注册应直连中心内网 IP；若当前页面经过域名或反向代理，请先替换 MANAGER_URL。默认监听 33802，只应允许当前管理端访问。</small></div><code>${installCommand}</code><button class="btn btn-sm btn-secondary" type="button" onclick="HostManagement.copyInstallCommand()">复制命令</button></div>` : ''}
+      ${canManage ? `<div class="agent-install-card"><div><strong>目标机安装命令</strong><small>先完整复制并解压发布包，保留 <code>bin/iptables-web-agent</code> 与 <code>scripts/install-lib.sh</code>，再运行 <code>sudo bash install-agent.sh</code> 即可进入交互安装；右侧命令用于直接安装。Agent 注册应直连中心内网 IP；若当前页面经过域名或反向代理，请先替换 MANAGER_URL。默认监听 33802，只应允许当前管理端访问。</small></div><code>${installCommand}</code><button class="btn btn-sm btn-secondary" type="button" onclick="HostManagement.copyInstallCommand()">复制命令</button></div>` : ''}
       ${this.error ? `<div class="alert alert-error"><strong>主机清单加载失败。</strong><details class="inline-error-detail"><summary>查看详情</summary><pre>${escapeHtml(this.error)}</pre></details></div>` : ''}
       ${canManage ? `${this.renderPending()}
       ${editing ? `<div class="host-setup-grid single-column">
@@ -291,7 +298,9 @@ const HostManagement = {
             <div class="host-form-grid">
               <div class="form-group"><label class="form-label">显示名称</label><input class="form-input" name="name" autocomplete="off" maxlength="64" required value="${escapeHtml(editing ? editing.name : '')}" placeholder="生产节点 01"></div>
               <div class="form-group"><label class="form-label">分组</label><input class="form-input" name="group" autocomplete="off" maxlength="64" value="${escapeHtml(editing ? (editing.group || '') : '')}" placeholder="production"></div>
-              <div class="form-group host-form-span"><label class="form-label">Agent 回连地址</label><div class="read-only-field mono">${escapeHtml(editing.base_url)}</div><small>如需变更，请修改目标机的 <code>AGENT_PUBLIC_URL</code> 并重启 Agent，然后在待确认列表批准地址变更。</small></div>
+              <div class="form-group"><label class="form-label" for="host-probe-interval">回连检测间隔（秒）</label><input id="host-probe-interval" class="form-input" name="probe_interval_seconds" type="number" min="0" max="3600" required value="${Number(editing.probe_interval_seconds || 0)}"><small>0 = 跟随全局 ${Number(AppState.monitoringPolicy.probe_interval_seconds)} 秒；独立配置为 15-3600 秒。</small></div>
+ <div class="form-group"><label class="form-label" for="host-offline-after">心跳离线阈值（秒）</label><input id="host-offline-after" class="form-input" name="offline_after_seconds" type="number" min="0" max="86400" required value="${Number(editing.offline_after_seconds || 0)}"><small>0 = 跟随全局 ${Number(AppState.monitoringPolicy.offline_after_seconds)} 秒；独立配置为 30-86400 秒。</small></div>
+ <div class="form-group host-form-span"><label class="form-label">Agent 回连地址</label><div class="read-only-field mono">${escapeHtml(editing.base_url)}</div><small>如需变更，请修改目标机的 <code>AGENT_PUBLIC_URL</code> 并重启 Agent，然后在待确认列表批准地址变更。</small></div>
             </div>
             <div id="host-tls-fields" class="host-tls-fields" ${editing.base_url.startsWith('https://') ? '' : 'hidden'}>
               <label class="form-label">HTTPS 自签名证书 CA（可选）</label>
@@ -325,7 +334,7 @@ const HostManagement = {
       const scheme = host.base_url.startsWith('https://') ? 'HTTPS' : 'HTTP';
       const status = this.statuses[host.id] || {};
       const view = hostStatusPresentation(host, status);
-      return `<tr><td><strong>${escapeHtml(host.name)}</strong><br><small>${escapeHtml(host.group || '未分组')}</small></td><td><span class="badge badge-return">${scheme}</span> <span class="mono">${escapeHtml(host.base_url)}</span></td><td id="host-status-cell-${host.id}">${this.renderStatusCell(host)}</td><td>${host.has_api_key ? 'Agent Key 已加密' : '缺少 Agent Key'}${host.has_custom_ca ? ' · 自定义 CA' : ''}</td><td><div class="btn-group"><button class="btn btn-xs btn-secondary" onclick="HostManagement.probe('${host.id}',false)" ${status.loading || view.kind === 'offline' ? 'disabled' : ''}>检测</button><button class="btn btn-xs btn-primary" onclick="AppState.openHost('${host.id}','dashboard')" ${view.canOpen ? '' : 'disabled'}>查看配置</button>${canManage ? `<button class="btn btn-xs btn-secondary" onclick="HostManagement.edit('${host.id}')">编辑</button><button class="btn btn-xs btn-danger" onclick="HostManagement.remove('${host.id}')">移除</button>` : ''}</div></td></tr>`;
+      return `<tr><td><strong>${escapeHtml(host.name)}</strong><br><small>${escapeHtml(host.group || '未分组')}</small></td><td><span class="badge badge-return">${scheme}</span> <span class="mono">${escapeHtml(host.base_url)}</span></td><td id="host-status-cell-${host.id}">${this.renderStatusCell(host)}</td><td>${host.has_api_key ? 'Agent Key 已加密' : '缺少 Agent Key'}${host.has_custom_ca ? ' · 自定义 CA' : ''}</td><td><div class="btn-group"><button class="btn btn-xs btn-secondary" onclick="HostManagement.probe('${host.id}',false)" ${status.loading || status.queued ? 'disabled' : ''}>检测</button><button class="btn btn-xs btn-primary" onclick="AppState.openHost('${host.id}','dashboard')" ${view.canOpen ? '' : 'disabled'}>查看配置</button>${canManage ? `<button class="btn btn-xs btn-secondary" onclick="HostManagement.edit('${host.id}')">编辑</button><button class="btn btn-xs btn-danger" onclick="HostManagement.remove('${host.id}')">移除</button>` : ''}</div></td></tr>`;
     }).join('')}</tbody></table></div>`;
   }
 };
@@ -334,7 +343,7 @@ function hostStatusPresentation(host, status) {
   if (typeof hostConnectivityPresentation === 'function') return hostConnectivityPresentation(host, status);
   status = status || {};
   const seen = new Date(host.agent_last_seen_at || '').getTime();
-  const reporting = Number.isFinite(seen) && Date.now() - seen <= 45000;
+  const reporting = Number.isFinite(seen) && Date.now() - seen <= (Number(host.offline_after_seconds) || 45) * 1000;
   const detail = Number.isFinite(seen) ? formatFallbackAgentSeen(seen) : '尚未收到 Agent 心跳';
   if (!host.enabled) return { text: '已停用', className: 'badge-drop', kind: 'disabled', canOpen: false, detail };
   if (Number.isFinite(seen) && !reporting) return { text: 'Agent 离线', className: 'badge-drop', kind: 'offline', canOpen: false, detail };

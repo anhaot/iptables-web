@@ -1,6 +1,8 @@
 package change
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -61,5 +63,29 @@ func TestDiffHostsAndAccessKeysUsesSafeResponses(t *testing.T) {
 	keyChanges := DiffAccessKeys(beforeKeys, afterKeys)
 	if len(keyChanges) != 2 || keyChanges[0].After != nil || keyChanges[1].Before != nil {
 		t.Fatalf("access-key changes=%#v", keyChanges)
+	}
+}
+
+func TestRollbackStatusRejectsInvalidRules(t *testing.T) {
+	for name, rules := range map[string][]*model.Rule{
+		"null":         {nil},
+		"empty id":     {{Chain: "INPUT", Action: "ACCEPT", Position: 1}},
+		"duplicate id": {{ID: "same", Chain: "INPUT", Action: "ACCEPT", Position: 1}, {ID: "same", Chain: "OUTPUT", Action: "DROP", Position: 1}},
+		"bad action":   {{ID: "one", Chain: "INPUT", Action: "RUN", Position: 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollback.json")
+			state := RollbackState{ID: "snapshot", ExpiresAt: time.Now().Add(time.Hour), Rules: rules}
+			data, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NewManager("", path, time.Minute).RollbackStatus(); err == nil {
+				t.Fatal("invalid rollback accepted")
+			}
+		})
 	}
 }

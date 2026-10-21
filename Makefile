@@ -1,9 +1,8 @@
-.PHONY: build package run test integration-test clean docker-build docker-up docker-down docker-logs docker-restart dev help install install-binary uninstall
+.PHONY: build package run test script-test integration-test clean dev help install install-binary uninstall
 
 APP_NAME := iptables-web
 AGENT_NAME := iptables-web-agent
 BIN_DIR := bin
-DOCKER_IMAGE := iptables-web:latest
 BUILD_PROCS ?= 2
 
 help: ## Show this help
@@ -30,6 +29,9 @@ test: ## Run Go tests
 integration-test: ## Run isolated controller/Agent end-to-end smoke test
 	bash scripts/integration-smoke.sh
 
+script-test: ## Verify installer path safety without changing the system
+	bash scripts/install-path-test.sh
+
 clean: ## Remove build artifacts
 	rm -rf $(BIN_DIR)
 
@@ -41,21 +43,6 @@ install-binary: ## Install from a prebuilt package directory
 
 uninstall: ## Remove managed rules, service, binary, docs, and data
 	sudo bash scripts/uninstall.sh
-
-docker-build: ## Build Docker image
-	docker build -t $(DOCKER_IMAGE) .
-
-docker-up: ## Start with Docker Compose
-	docker compose up -d --build
-
-docker-down: ## Stop Docker Compose services
-	docker compose down
-
-docker-logs: ## View logs
-	docker compose logs -f
-
-docker-restart: ## Restart the service
-	docker compose restart
 
 dev: ## Run in development mode
 	@mkdir -p data

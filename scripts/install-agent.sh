@@ -135,8 +135,8 @@ validate_base_url "${AGENT_PUBLIC_URL}" || error "AGENT_PUBLIC_URL 必须是中�
 AGENT_HEALTH_URL="$(install_health_url "${AGENT_LISTEN_ADDR}")"
 [ -z "${MANAGER_CA_FILE}" ] || [ -f "${MANAGER_CA_FILE}" ] || error "MANAGER_CA_FILE 不存在: ${MANAGER_CA_FILE}"
 [ -z "${MANAGER_CA_FILE}" ] || install_validate_absolute_path MANAGER_CA_FILE "${MANAGER_CA_FILE}" || exit 1
-install_validate_runtime_path DATA_DIR "${DATA_DIR}" || exit 1
-install_validate_runtime_path CONFIG_DIR "${CONFIG_DIR}" || exit 1
+install_validate_private_dir DATA_DIR "${DATA_DIR}" || exit 1
+install_validate_private_dir CONFIG_DIR "${CONFIG_DIR}" || exit 1
 install_validate_runtime_path BIN_DIR "${BIN_DIR}" || exit 1
 install_validate_absolute_path SERVICE_FILE "${SERVICE_FILE}" || exit 1
 install_validate_runtime_path ENV_FILE "${ENV_FILE}" || exit 1

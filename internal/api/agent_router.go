@@ -62,6 +62,8 @@ func NewAgentRouterWithVerifier(h *Handler, verifier *AgentKeyVerifier) http.Han
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET or POST")
 		}
 	})
+	mux.HandleFunc("/api/v1/rules/batch-delete", postOnly(h.BatchDeleteRules))
+	mux.HandleFunc("/api/v1/docker/whitelist/batch", postOnly(h.CreateDockerWhitelistBatch))
 	mux.HandleFunc("/api/v1/rules/reorder", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use PUT")

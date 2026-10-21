@@ -1653,3 +1653,25 @@ tr:hover td {
   .access-key-create { grid-template-columns: 1fr; }
   .pending-ca textarea { min-width: 220px; }
 }
+
+/* Monitoring defaults, fleet search and container-scoped bulk operations. */
+.monitoring-form { padding: 1.25rem; }
+.monitoring-note { color: var(--text-secondary); font-size: .85rem; line-height: 1.65; margin: .8rem 0; }
+.fleet-hosts-header { flex-wrap: wrap; gap: 1rem; }
+.fleet-hosts-title { min-width: 200px; }
+.fleet-host-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .7rem; margin-left: auto; }
+.fleet-host-actions .search-input { width: 250px; min-width: 180px; flex: 0 1 250px; }
+#fleet-search-count { color: var(--text-secondary); font-size: .85rem; white-space: nowrap; }
+.docker-container-group { margin-bottom: 1.25rem; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-card); overflow: hidden; }
+.docker-container-header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; padding: 1.1rem 1.25rem; background: var(--bg-secondary); }
+.docker-container-toggle { display: flex; align-items: center; gap: .8rem; flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
+.docker-container-toggle:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 5px; border-radius: var(--radius-sm); }
+.docker-container-chevron { color: var(--text-muted); }
+.docker-container-summary { display: flex; min-width: 0; flex-direction: column; gap: .3rem; }
+.docker-container-summary strong { font-size: 1rem; overflow-wrap: anywhere; }
+.docker-container-header small { color: var(--text-secondary); }
+.docker-container-group > .docker-policy-list { padding: 1rem; }
+.docker-rule-selection { display: flex; align-items: center; gap: .7rem; cursor: pointer; }
+.docker-bulk-modal { position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+.docker-bulk-ports { margin: 1rem 0; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .8rem 1rem; max-height: 210px; overflow-y: auto; }
+.docker-bulk-ports .form-check { display: flex; margin: .5rem 0; gap: .5rem; }

@@ -102,3 +102,64 @@ func assertOrder(t *testing.T, s *JSONStore, want []string) {
 		}
 	}
 }
+
+func TestJSONStoreLoadRejectsInvalidRulesWithoutReplacingMemory(t *testing.T) {
+	for name, data := range map[string]string{
+		"null entry":      `[null]`,
+		"empty id":        `[{"chain":"INPUT","action":"ACCEPT"}]`,
+		"duplicate id":    `[{"id":"dup","chain":"INPUT","action":"ACCEPT"},{"id":"dup","chain":"OUTPUT","action":"DROP"}]`,
+		"invalid action":  `[{"id":"bad","chain":"INPUT","action":"EXEC"}]`,
+		"invalid address": `[{"id":"bad","chain":"INPUT","action":"ACCEPT","source":"::1"}]`,
+		"invalid json":    `[{"id":"bad"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rules.json")
+			s := NewJSONStore(path)
+			if err := s.Create(&model.Rule{ID: "original", Chain: "INPUT", Action: "ACCEPT"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Load(); err == nil {
+				t.Fatal("invalid rules file was accepted")
+			}
+			rules, err := s.All()
+			if err != nil || len(rules) != 1 || rules[0].ID != "original" {
+				t.Fatalf("failed Load replaced memory: %#v, %v", rules, err)
+			}
+		})
+	}
+}
+
+func TestJSONStoreLoadsLegacyPositionsAndBackend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.json")
+	if err := os.WriteFile(path, []byte(`[{"id":"legacy","backend":"iptables","chain":"input","action":"accept"}]`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewJSONStore(path)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	rule, err := s.Get("legacy")
+	if err != nil || rule.Position != 1 || rule.Backend != model.BackendPacket || rule.Chain != "INPUT" {
+		t.Fatalf("legacy normalization: %#v, %v", rule, err)
+	}
+}
+
+func TestJSONStoreRetainsLegacyMetadataForStartupMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.json")
+	data := `[{"id":"firewalld","backend":"firewalld","chain":"INPUT"},{"id":"docker","chain":"DOCKER_USER","action":"ACCEPT","protocol":"tcp","dport":"8080","original_dport":"8080"}]`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewJSONStore(path)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	legacy, _ := s.Get("firewalld")
+	docker, _ := s.Get("docker")
+	if legacy.Backend != "firewalld" || docker.DPort != "8080" || docker.OriginalDPort != "8080" {
+		t.Fatal("Load bypassed or broke the explicit startup migrations")
+	}
+}

@@ -70,7 +70,7 @@ func TestDeleteRulesUsesMatchingBackends(t *testing.T) {
 	if len(packet.deleted) != 1 || packet.deleted[0].ID != "packet-1" {
 		t.Fatalf("packet deleted = %#v", packet.deleted)
 	}
-	if len(packet.legacyDeleted) != 1 || packet.legacyDeleted[0].ID != "packet-1" {
+	if len(packet.legacyDeleted) != 0 {
 		t.Fatalf("packet legacy deleted = %#v", packet.legacyDeleted)
 	}
 }
@@ -87,27 +87,6 @@ func TestDeleteOwnedRulesNeverDeletesLegacyLookalike(t *testing.T) {
 	}
 	if len(packet.legacyDeleted) != 0 {
 		t.Fatalf("Agent cleanup deleted %d untagged lookalikes", len(packet.legacyDeleted))
-	}
-}
-
-func TestMigrateLegacyRulesOnlyDeletesUnownedRules(t *testing.T) {
-	rule := &model.Rule{ID: "packet-1", Backend: model.BackendPacket, Chain: "INPUT"}
-	legacy := &recordingBackend{}
-	exe := &Executor{backend: legacy}
-	if err := exe.MigrateLegacyRules([]*model.Rule{rule}); err != nil {
-		t.Fatalf("MigrateLegacyRules() error = %v", err)
-	}
-	if len(legacy.legacyDeleted) != 1 {
-		t.Fatalf("legacy deletions = %d, want 1", len(legacy.legacyDeleted))
-	}
-
-	owned := &recordingBackend{exists: true}
-	exe = &Executor{backend: owned}
-	if err := exe.MigrateLegacyRules([]*model.Rule{rule}); err != nil {
-		t.Fatalf("MigrateLegacyRules() with owned rule error = %v", err)
-	}
-	if len(owned.legacyDeleted) != 0 {
-		t.Fatalf("owned rule triggered %d legacy deletions", len(owned.legacyDeleted))
 	}
 }
 

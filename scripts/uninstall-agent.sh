@@ -19,8 +19,12 @@ error() { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
 
 validate_remove_dir() {
 	local name="$1" path="$2"
+	local canonical
+	canonical="$(realpath -m -- "${path}")" || error "无法规范化 ${name}"
+	[ "${canonical}" = "${path}" ] || error "${name} 必须使用规范绝对路径，不能包含符号链接、.. 或尾部斜杠"
 	case "${path}" in
-		/|/etc|/usr|/var|/opt|/usr/local|/var/lib|/etc/systemd) error "拒绝删除过宽的 ${name}: ${path}" ;;
+		/|/etc|/usr|/var|/opt|/usr/local|/var/lib|/etc/systemd|/etc/systemd/system|/usr/bin|/usr/sbin|/usr/local/bin|/usr/share|/usr/lib|/usr/local/share|/home|/root|/srv|/mnt|/media|/var/log|/var/cache|/var/lib/docker|/var/lib/systemd|/etc/ssh|/etc/ssl|/etc/security|/etc/pam.d|/tmp|/var/tmp) error "拒绝删除过宽的 ${name}: ${path}" ;;
+		/dev|/dev/*|/proc|/proc/*|/sys|/sys/*|/boot|/boot/*|/run|/run/*) error "拒绝删除系统目录 ${name}: ${path}" ;;
 		/*) ;;
 		*) error "${name} 必须是绝对路径: ${path}" ;;
 	esac

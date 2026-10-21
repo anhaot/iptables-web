@@ -86,6 +86,8 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, hostH *HostHa
 		}
 	})))
 
+	mux.HandleFunc("/api/v1/monitoring-policy", func(w http.ResponseWriter, r *http.Request) { hostH.monitoringPolicy(w, r, h.changes) })
+
 	// Remote host inventory and explicitly allow-listed API forwarding.
 	mux.Handle("/api/v1/hosts", hostH)
 	mux.Handle("/api/v1/hosts/", hostH)
@@ -114,6 +116,8 @@ func NewRouter(h *Handler, authH *AuthHandler, userH *UserHandler, hostH *HostHa
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET or POST")
 		}
 	})
+	mux.Handle("/api/v1/rules/batch-delete", localOnly(http.HandlerFunc(postOnly(h.BatchDeleteRules))))
+	mux.Handle("/api/v1/docker/whitelist/batch", localOnly(http.HandlerFunc(postOnly(h.CreateDockerWhitelistBatch))))
 	mux.HandleFunc("/api/v1/rules/reorder", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			respondError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use PUT")

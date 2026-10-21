@@ -92,9 +92,22 @@ func (s *UserStore) Load() error {
 		}
 		return s.writeFileLocked()
 	}
-	if err := json.Unmarshal(data, &s.users); err != nil {
+	var users []*model.User
+	if err := json.Unmarshal(data, &users); err != nil {
 		return fmt.Errorf("解析用户数据: %w", err)
 	}
+	seenIDs := make(map[string]bool, len(users))
+	seenNames := make(map[string]bool, len(users))
+	for _, user := range users {
+		if user == nil || user.ID == "" || strings.TrimSpace(user.Username) == "" ||
+			seenIDs[user.ID] || seenNames[strings.ToLower(user.Username)] ||
+			(user.Role != "admin" && user.Role != "user") {
+			return fmt.Errorf("用户文件包含空记录、无效角色或重复的用户 ID/用户名")
+		}
+		seenIDs[user.ID] = true
+		seenNames[strings.ToLower(user.Username)] = true
+	}
+	s.users = users
 	// Ensure at least one admin exists
 	hasAdmin := false
 	changed := false
@@ -131,6 +144,9 @@ func (s *UserStore) Load() error {
 		}
 	}
 	if !hasAdmin {
+		if seenNames["admin"] {
+			return fmt.Errorf("用户文件没有管理员，且 admin 用户名已被占用；请从备份恢复管理员数据")
+		}
 		if err := s.createDefaultAdminLocked(); err != nil {
 			return err
 		}
@@ -334,6 +350,9 @@ func (s *UserStore) Update(user *model.User) error {
 				}
 			}
 			updated := cloneUser(user)
+			if u.Role == "admin" && updated.Role != "admin" && s.enabledAdminsExceptLocked(u.ID) == 0 {
+				return fmt.Errorf("不能降级最后一个未禁用的管理员，请先创建或解锁其他管理员")
+			}
 			passwordChanged := updated.Password != ""
 			updated.UpdatedAt = time.Now()
 			updated.CreatedAt = u.CreatedAt
@@ -384,22 +403,11 @@ func (s *UserStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	adminCount := 0
-	targetIsAdmin := false
-	for _, u := range s.users {
-		if u.Role == "admin" {
-			adminCount++
-			if u.ID == id {
-				targetIsAdmin = true
-			}
-		}
-	}
-	if targetIsAdmin && adminCount <= 1 {
-		return fmt.Errorf("不能删除最后一个管理员")
-	}
-
 	for i, u := range s.users {
 		if u.ID == id {
+			if u.Role == "admin" && s.enabledAdminsExceptLocked(id) == 0 {
+				return fmt.Errorf("不能删除最后一个未禁用的管理员，请先创建或解锁其他管理员")
+			}
 			original := append([]*model.User(nil), s.users...)
 			s.users = append(s.users[:i], s.users[i+1:]...)
 			if err := s.writeFileLocked(); err != nil {
@@ -411,6 +419,18 @@ func (s *UserStore) Delete(id string) error {
 		}
 	}
 	return fmt.Errorf("用户 %s 不存在", id)
+}
+
+// Caller must hold s.mu. Timed locks expire; only persistent account disabling
+// removes an administrator from the recovery paths counted here.
+func (s *UserStore) enabledAdminsExceptLocked(excludeID string) int {
+	count := 0
+	for _, user := range s.users {
+		if user.ID != excludeID && user.Role == "admin" && !user.LoginDisabled {
+			count++
+		}
+	}
+	return count
 }
 
 // ResetAccount restores an ordinary user to the administrator-configured
@@ -761,13 +781,7 @@ func (s *UserStore) RecordLoginFailure(username, sourceIP string) error {
 		// admin only while another enabled admin remains. The last enabled admin
 		// receives the configured timed lock instead.
 		if user.Role == "admin" {
-			enabledAdmins := 0
-			for _, candidate := range s.users {
-				if candidate.Role == "admin" && !candidate.LoginDisabled {
-					enabledAdmins++
-				}
-			}
-			if enabledAdmins <= 1 {
+			if s.enabledAdminsExceptLocked(user.ID) == 0 {
 				att.LockedUntil = time.Now().Add(time.Duration(s.policy.Login.LockoutMinutes) * time.Minute)
 				return nil
 			}

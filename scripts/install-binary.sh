@@ -65,9 +65,9 @@ validate_inputs() {
 		error "HOST_CREDENTIAL_KEY 配置后至少需要 32 个字符"
 	fi
 	install_reject_control_chars HOST_CREDENTIAL_KEY "${HOST_CREDENTIAL_KEY}" || exit 1
-	install_validate_absolute_path INSTALL_DIR "${INSTALL_DIR}" || exit 1
-	install_validate_runtime_path DATA_DIR "${DATA_DIR}" || exit 1
-	install_validate_runtime_path CONFIG_DIR "${CONFIG_DIR}" || exit 1
+	install_validate_private_dir INSTALL_DIR "${INSTALL_DIR}" || exit 1
+	install_validate_private_dir DATA_DIR "${DATA_DIR}" || exit 1
+	install_validate_private_dir CONFIG_DIR "${CONFIG_DIR}" || exit 1
 	install_validate_runtime_path BIN_DIR "${BIN_DIR}" || exit 1
 	install_validate_absolute_path SERVICE_FILE "${SERVICE_FILE}" || exit 1
 	install_validate_runtime_path ENV_FILE "${ENV_FILE}" || exit 1

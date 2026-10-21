@@ -47,13 +47,24 @@ async function apiRequest(method, path, body, rawJSON, unscoped, hostID) {
     if (resp.status === 204) {
       return null;
     }
-    const json = await resp.json();
+    // Older Agents and reverse proxies can return text/HTML errors. Preserve
+    // their HTTP status so callers can handle unsupported operations correctly.
+    let json;
+    try {
+      json = JSON.parse(await resp.text());
+    } catch (_) {
+      if (!resp.ok) throw new ApiError(resp.status, 'http_error', `服务器请求失败（HTTP ${resp.status}），请检查服务或目标 Agent 版本`);
+      throw new ApiError(resp.status, 'invalid_response', '服务器响应格式异常，请刷新列表确认操作结果，避免重复提交');
+    }
     if (!resp.ok) {
-      const code = json.error?.code || 'unknown';
+      const code = json?.error?.code || 'unknown';
       if (resp.status === 403 && code === 'password_change_required' && window.location.pathname !== '/change-password.html') {
         window.location.href = '/change-password.html';
       }
-      throw new ApiError(resp.status, code, json.error?.message || resp.statusText);
+      throw new ApiError(resp.status, code, json?.error?.message || resp.statusText || `HTTP ${resp.status}`);
+    }
+    if (!json || json.success !== true || typeof json !== 'object' || Array.isArray(json)) {
+      throw new ApiError(resp.status, json?.error?.code || 'invalid_response', json?.error?.message || '服务器响应格式异常，请刷新列表确认操作结果，避免重复提交');
     }
     return json.data;
   } catch (err) {
@@ -78,7 +89,9 @@ const api = {
   unlockAccount: (id) => apiRequest('POST', `/users/${id}/unlock`),
   deleteUser: (id) => apiRequest('DELETE', `/users/${id}`),
   changePassword: (oldPwd, newPwd) => apiRequest('POST', '/auth/password', { old_password: oldPwd, new_password: newPwd }),
-  getSecurityPolicy: () => apiRequest('GET', '/security-policy'),
+  getMonitoringPolicy: () => apiRequest('GET', '/monitoring-policy', undefined, false, true),
+ updateMonitoringPolicy: (policy) => apiRequest('PUT', '/monitoring-policy', policy, false, true),
+ getSecurityPolicy: () => apiRequest('GET', '/security-policy'),
   updateSecurityPolicy: (policy) => apiRequest('PUT', '/security-policy', policy),
 
   // Managed Agents (always handled by the controller)
@@ -86,7 +99,7 @@ const api = {
   getHost: (id) => apiRequest('GET', `/hosts/${id}`),
   updateHost: (id, host) => apiRequest('PUT', `/hosts/${id}`, host),
   deleteHost: (id) => apiRequest('DELETE', `/hosts/${id}`),
-  probeHost: (id) => apiRequest('GET', `/hosts/${id}/probe`),
+  probeHost: (id, force) => apiRequest('GET', `/hosts/${id}/probe${force ? '?force=1' : ''}`),
   batchCreateRule: (hostIDs, rule) => apiRequest('POST', '/hosts/batch/rules', { host_ids: hostIDs, rule }),
   listAgentEnrollments: () => apiRequest('GET', '/agent-enrollments'),
   approveAgentEnrollments: (ids, caPEMByID) => apiRequest('POST', '/agent-enrollments/approve', { ids, ca_pem_by_id: caPEMByID || {} }),
@@ -112,7 +125,9 @@ const api = {
   createRule: (rule, hostID) => apiRequest('POST', '/rules', rule, false, false, hostID),
   updateRule: (id, rule, hostID) => apiRequest('PUT', `/rules/${id}`, rule, false, false, hostID),
   deleteRule: (id, hostID) => apiRequest('DELETE', `/rules/${id}`, undefined, false, false, hostID),
-  toggleRule: (id, hostID) => apiRequest('POST', `/rules/${id}/toggle`, undefined, false, false, hostID),
+  batchDeleteRules: (rules, hostID) => apiRequest('POST', '/rules/batch-delete', { rule_ids: rules.map(rule => rule.id), expected_updated_at: Object.fromEntries(rules.map(rule => [rule.id, rule.updated_at])) }, false, false, hostID),
+ createDockerWhitelistBatch: (request, hostID) => apiRequest('POST', '/docker/whitelist/batch', request, false, false, hostID),
+ toggleRule: (id, hostID) => apiRequest('POST', `/rules/${id}/toggle`, undefined, false, false, hostID),
   reorderRules: (chain, ids, hostID) => apiRequest('PUT', '/rules/reorder', { backend: 'packet', chain, rule_ids: ids }, false, false, hostID),
 
   // System
@@ -176,5 +191,5 @@ const api = {
 };
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { scopedAPIPath };
+  module.exports = { scopedAPIPath, apiRequest, ApiError };
 }

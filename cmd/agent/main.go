@@ -127,9 +127,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("list managed rules: %v", err)
 	}
-	if err := executor.MigrateLegacyRules(rules); err != nil {
-		log.Fatalf("migrate managed rules: %v", err)
-	}
 	if err := executor.SyncRules(rules); err != nil {
 		log.Fatalf("restore managed rules: %v", err)
 	}

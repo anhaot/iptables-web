@@ -162,7 +162,7 @@ assert.strictEqual(scopedAPIPath('/rules'), '/hosts/mutable-host/api/rules', 'le
 const { hostStatusPresentation } = require('../web/js/components/host-management.js');
 assert.strictEqual(hostStatusPresentation({ enabled: false }, { online: true }).text, '已停用');
 assert.strictEqual(hostStatusPresentation({ enabled: true }, { online: true, latency: 12 }).text, '在线 · 12ms');
-const probeMethod = hostManagementUI.match(/async probe\(id, quiet\) \{[\s\S]*?\n  \},/);
+const probeMethod = hostManagementUI.match(/async probe\(id, quiet, force = !quiet\) \{[\s\S]*?\n  \},/);
 assert.ok(probeMethod, 'host probe method must exist');
 assert.doesNotMatch(probeMethod[0], /this\.render\(\)/, 'probe status updates must not replace a form being edited');
 assert.match(probeMethod[0], /this\.renderStatus\(id\)/);
@@ -227,3 +227,74 @@ assert.match(passwordChangeUI, /min_length: 1/);
 assert.ok(fs.existsSync(require.resolve('../web/favicon.svg')));
 
 process.stdout.write('UI auth, rule preview, audit, rollback, and Docker logic verified\n');
+
+const { effectiveHostMonitoring } = require('../web/js/app.js');
+const { fleetHostMatches } = require('../web/js/components/fleet-overview.js');
+assert.deepStrictEqual(effectiveHostMonitoring({probe_interval_seconds:30},{probe_interval_seconds:120,offline_after_seconds:90}), {probe_interval_seconds:30,offline_after_seconds:90});
+assert.strictEqual(agentHeartbeatState({agent_last_seen_at:'2026-08-05T11:59:00Z',offline_after_seconds:90},heartbeatNow).state,'reporting');
+const searchHost={name:'生产 Web',group:'PROD',base_url:'https://10.20.3.4:33802',agent_id:'aabbcc'};
+assert.strictEqual(fleetHostMatches(searchHost,'web 10.20'),true);
+assert.strictEqual(fleetHostMatches(searchHost,'prod'),true);
+assert.strictEqual(fleetHostMatches(searchHost,'10.99'),false);
+const { groupDockerPolicies, parseDockerSources, dockerBatchPayload }=require('../web/js/components/docker-ports.js');
+assert.deepStrictEqual(parseDockerSources('10.0.0.1,10.0.0.2\n10.0.0.1；10.1.0.0/16'),['10.0.0.1','10.0.0.2','10.1.0.0/16']);
+const grouped=groupDockerPolicies(buildDockerPolicies([
+ {container_id:'container-a',container_name:'app',host_ip:'0.0.0.0',host_port:8080,container_port:80,protocol:'tcp'},
+ {container_id:'container-a',container_name:'app',host_ip:'0.0.0.0',host_port:8443,container_port:443,protocol:'tcp'},
+ {container_id:'container-b',container_name:'other',host_ip:'0.0.0.0',host_port:9000,container_port:80,protocol:'tcp'}
+],[], 'ipv4'));
+assert.strictEqual(grouped.length,2);
+assert.strictEqual(grouped[0].mappings.length,2,'one container should group all its published ports');
+const payload=dockerBatchPayload(['10.0.0.1'],[{container_id:'not-a-request-field',family:'ipv4',host_port:8080,container_port:80,host_ip:'0.0.0.0',container_name:'app',protocol:'tcp'}]);
+assert.strictEqual('container_id' in payload.mappings[0],false,'Docker discovery metadata must not leak into strict API requests');
+assert.strictEqual('family' in payload.mappings[0],false);
+process.stdout.write('Monitoring inheritance, fleet search, Docker grouping and batch payloads verified\n');
+
+// Exercise actual HTTP response decoding: legacy Agents return a plain text 404.
+async function verifyAPIResponsesAndHostIsolation() {
+  const { apiRequest, ApiError } = require('../web/js/api.js');
+  const originalFetch = global.fetch;
+  const originalAppState = global.AppState;
+  const originalWindow = global.window;
+  global.window = { location: { pathname: '/index.html', href: '' } };
+  try {
+    for (const [status, body, code] of [
+      [404, '404 page not found\n', 'http_error'],
+      [405, 'Method Not Allowed', 'http_error'],
+      [502, '<html>Bad Gateway</html>', 'http_error'],
+      [400, 'null', 'unknown'],
+      [409, '{"success":false,"error":{"code":"agent_upgrade_required","message":"请升级 Agent"}}', 'agent_upgrade_required'],
+      [200, '{"success":true}unexpected', 'invalid_response'],
+      [200, 'null', 'invalid_response'],
+      [200, '{"success":false,"error":{"code":"validation_error","message":"bad input"}}', 'validation_error'],
+    ]) {
+      let requests = 0;
+      global.fetch = async () => { requests++; return { status, ok: status < 400, text: async () => body }; };
+      await assert.rejects(apiRequest('POST', '/docker/whitelist/batch', {}, false, false, ''), error => error instanceof ApiError && error.status === status && error.code === code && !/Unexpected/.test(error.message));
+      assert.strictEqual(requests, 1, 'writes must never be automatically retried');
+    }
+    global.fetch = async () => ({ status: 201, ok: true, text: async () => '{"success":true,"data":{"id":"created"}}' });
+    assert.deepStrictEqual(await apiRequest('POST', '/rules', {}, false, false, ''), {id:'created'});
+    global.fetch = async () => ({ status: 204, ok: true, text: async () => { throw new Error('204 has no body'); } });
+    assert.strictEqual(await apiRequest('DELETE', '/rules/test', undefined, false, false, ''), null);
+    global.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    await assert.rejects(apiRequest('GET', '/hosts'), error => error.status === 0 && error.code === 'network_error');
+
+    const { DockerPorts } = require('../web/js/components/docker-ports.js');
+    global.AppState = { captureHostContext: () => ({hostID:'new'}), isHostContextCurrent: ctx => ctx.hostID === 'new' };
+    DockerPorts.selectionContext = {hostID:'old'};
+    DockerPorts.mappings = [{container_name:'old-host-container'}];
+    DockerPorts.rules = [{id:'old-rule'}];
+    DockerPorts.diagnostics = {path:{usable:true}};
+    DockerPorts.selectedRules.add('old-rule');
+    DockerPorts.resetSelectionContext();
+    assert.deepStrictEqual(DockerPorts.mappings, []);
+    assert.deepStrictEqual(DockerPorts.rules, []);
+    assert.strictEqual(DockerPorts.diagnostics, null);
+    assert.strictEqual(DockerPorts.selectedRules.size, 0);
+    process.stdout.write('Legacy/plain text HTTP errors, no write retries, and Docker host isolation verified\n');
+  } finally {
+    global.fetch = originalFetch; global.AppState = originalAppState; global.window = originalWindow;
+  }
+}
+verifyAPIResponsesAndHostIsolation().catch(error => { console.error(error); process.exitCode = 1; });

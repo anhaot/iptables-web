@@ -69,11 +69,11 @@ func verifyPBKDF2(password, encoded string) bool {
 		return false
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[1])
-	if err != nil {
+	if err != nil || len(salt) != saltSize {
 		return false
 	}
 	expected, err := base64.RawStdEncoding.DecodeString(parts[2])
-	if err != nil {
+	if err != nil || len(expected) != keySize {
 		return false
 	}
 	actual := pbkdf2Key([]byte(password), salt, iterations, len(expected))

@@ -16,6 +16,8 @@ const SystemView = {
   rollbackConfirm: false,
   hosts: [],
   securityPolicy: null,
+ monitoringPolicy: null,
+ monitoringSaving: false,
   accessKeys: [],
   newAccessKey: null,
   refreshSerial: 0,
@@ -28,7 +30,7 @@ const SystemView = {
     var role = sessionStorage.getItem('auth_role') || '';
     var requests = [];
     var mode = AppState.page;
-    if (mode === 'users' && (role === 'admin' || !getAuthToken())) requests = [api.listUsers(), api.listHosts(), api.getSecurityPolicy(), api.listAccessKeys()];
+    if (mode === 'users' && (role === 'admin' || !getAuthToken())) requests = [api.listUsers(), api.listHosts(), api.getSecurityPolicy(), api.listAccessKeys(), api.getMonitoringPolicy()];
     if (mode === 'system') requests = [
       (!AppState.activeLocal() || AppState.canManageFleet()) ? api.listAuditEvents(20, context.hostID) : Promise.resolve([]),
       api.getRollbackStatus(context.hostID)
@@ -40,6 +42,7 @@ const SystemView = {
       if (results[1] && results[1].status === 'fulfilled') this.hosts = results[1].value;
       if (results[2] && results[2].status === 'fulfilled') this.securityPolicy = results[2].value;
       if (results[3] && results[3].status === 'fulfilled') this.accessKeys = results[3].value;
+ if (results[4] && results[4].status === 'fulfilled') { this.monitoringPolicy = results[4].value; AppState.monitoringPolicy = results[4].value; }
     }
     if (mode === 'system') {
       if (results[0] && results[0].status === 'fulfilled') this.auditEvents = results[0].value;
@@ -473,7 +476,8 @@ const SystemView = {
     // ---- Controller user management ----
     if (usersMode) {
       if (role === 'admin' || !getAuthToken()) {
-        html += this.renderSecurityPolicyCard();
+        html += this.renderMonitoringCard();
+ html += this.renderSecurityPolicyCard();
       }
       html += '<div class="card" style="margin-bottom:1.25rem">' +
       '<div class="card-header"><h3>👥 用户管理</h3>' +
@@ -704,6 +708,24 @@ const SystemView = {
     return parts.join('，');
   },
 
+  renderMonitoringCard() {
+    const policy = this.monitoringPolicy || AppState.monitoringPolicy;
+    return `<div class="card" style="margin-bottom:1.25rem"><div class="card-header"><div><h3>在线检测设置</h3><small>主机未单独配置时采用这里的默认值；保存后动态生效。</small></div></div><form class="monitoring-form" onsubmit="SystemView.saveMonitoring(this);return false"><div class="host-form-grid"><div class="form-group"><label class="form-label" for="global-probe-interval">默认回连检测间隔（秒）</label><input id="global-probe-interval" name="probe_interval_seconds" class="form-input" type="number" min="15" max="3600" required value="${Number(policy.probe_interval_seconds)}"><small>15-3600 秒，默认 60 秒。</small></div><div class="form-group"><label class="form-label" for="global-offline-after">默认心跳离线阈值（秒）</label><input id="global-offline-after" name="offline_after_seconds" class="form-input" type="number" min="30" max="86400" required value="${Number(policy.offline_after_seconds)}"><small>30-86400 秒，默认 45 秒。</small></div></div><p class="monitoring-note">Agent 每 15 秒上报心跳；页面每 15 秒更新状态。自动回连检测在纳管页面打开时运行，多页面共用中心检测缓存；手动检测可立即重试。</p><button class="btn btn-primary" type="submit" ${this.monitoringSaving ? 'disabled' : ''}>${this.monitoringSaving ? '正在保存…' : '保存在线检测设置'}</button></form></div>`;
+  },
+
+  async saveMonitoring(form) {
+    if (!AppState.canManageFleet() || this.monitoringSaving) return;
+    const data = new FormData(form);
+    const policy = { probe_interval_seconds: Number(data.get('probe_interval_seconds')), offline_after_seconds: Number(data.get('offline_after_seconds')) };
+    this.monitoringSaving = true;
+    try {
+      this.monitoringPolicy = await api.updateMonitoringPolicy(policy);
+      AppState.monitoringPolicy = this.monitoringPolicy;
+      Toasts.success('在线检测设置已保存，跟随全局的主机立即采用新值');
+    } catch (error) { Toasts.error('保存失败：' + error.message); }
+    finally { this.monitoringSaving = false; if (AppState.page === 'users') this.render(); }
+  },
+
   renderSecurityPolicyCard() {
     if (!this.securityPolicy) return '<div class="card security-policy-card"><div class="loading-spinner"><div class="spinner"></div> 加载安全策略...</div></div>';
     var password = this.securityPolicy.password || {};
@@ -790,7 +812,10 @@ function renderAuditDetails(event) {
   appendAuditChangeSection(sections, '访问密钥变化', event.access_key_changes, function(change) {
     return auditChangePair('访问密钥 ' + (change.id || '—'), change.before, change.after);
   });
-  if (event.security_policy_before || event.security_policy_after) {
+  if (event.monitoring_policy_before || event.monitoring_policy_after) {
+ sections.push('<section><strong>在线检测设置变化</strong>' + auditBeforeAfter(event.monitoring_policy_before, event.monitoring_policy_after) + '</section>');
+ }
+ if (event.security_policy_before || event.security_policy_after) {
     sections.push('<section><strong>安全策略变化</strong>' + auditBeforeAfter(event.security_policy_before, event.security_policy_after) + '</section>');
   }
   if (sections.length === 1) {
@@ -822,7 +847,7 @@ function auditActionLabel(action) {
   var labels = {
     create_rule: '创建规则', update_rule: '更新规则', delete_rule: '删除规则',
     toggle_rule: '启停规则', reorder_rules: '调整规则顺序',
-    create_docker_whitelist: '创建 Docker 白名单', restore_firewall: '恢复防火墙',
+    create_docker_whitelist: '创建 Docker 白名单', create_docker_whitelists: '批量添加 Docker 来源', batch_delete_rules: '批量删除规则', update_monitoring_policy: '更新在线检测设置', restore_firewall: '恢复防火墙',
     clear_managed_rules: '清空托管规则', rollback_change: '回滚最近变更',
     change_password: '修改密码', manage_user: '管理用户', update_security_policy: '更新安全策略',
     manage_remote_host: '管理远程主机', manage_access_key: '管理中心访问密钥',

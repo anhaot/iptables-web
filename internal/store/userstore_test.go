@@ -4,12 +4,89 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"iptables-web/internal/auth"
 	"iptables-web/internal/model"
 )
+
+func TestUserStorePreservesEnabledAdministrator(t *testing.T) {
+	for _, operation := range []string{"demote", "delete"} {
+		for _, backup := range []string{"none", "disabled", "enabled"} {
+			t.Run(operation+"/"+backup, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "users.json")
+				s := NewUserStore(path)
+				s.users = []*model.User{{ID: "primary", Username: "primary", Password: "unchanged-hash", Role: "admin"}}
+				if backup != "none" {
+					s.users = append(s.users, &model.User{ID: "backup", Username: "backup", Password: "unchanged-hash", Role: "admin", LoginDisabled: backup == "disabled"})
+				}
+				if err := s.writeFileLocked(); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var updateErr error
+				if operation == "delete" {
+					updateErr = s.Delete("primary")
+				} else {
+					updateErr = s.Update(&model.User{ID: "primary", Username: "primary", Role: "user"})
+				}
+				if backup == "enabled" {
+					if updateErr != nil {
+						t.Fatal(updateErr)
+					}
+				} else {
+					if updateErr == nil {
+						t.Fatal("last enabled admin could be removed")
+					}
+					after, err := os.ReadFile(path)
+					if err != nil || string(after) != string(before) {
+						t.Fatalf("rejected change modified disk: %v", err)
+					}
+					user, err := s.Get("primary")
+					if err != nil || user.Role != "admin" {
+						t.Fatalf("rejected change modified memory: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestConcurrentAdminDemotionsLeaveOneAdministrator(t *testing.T) {
+	s := NewUserStore(filepath.Join(t.TempDir(), "users.json"))
+	s.users = []*model.User{{ID: "one", Username: "admin-one", Role: "admin"}, {ID: "two", Username: "admin-two", Role: "admin"}}
+	var wg sync.WaitGroup
+	errors := make(chan error, 2)
+	for _, id := range []string{"one", "two"} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			errors <- s.Update(&model.User{ID: id, Username: "admin-" + id, Role: "user"})
+		}(id)
+	}
+	wg.Wait()
+	close(errors)
+	failed := 0
+	for err := range errors {
+		if err != nil {
+			failed++
+		}
+	}
+	admins := 0
+	for _, user := range s.List() {
+		if user.Role == "admin" && !user.LoginDisabled {
+			admins++
+		}
+	}
+	if failed != 1 || admins != 1 {
+		t.Fatalf("errors=%d enabled admins=%d; want 1 each", failed, admins)
+	}
+}
 
 func TestUserStorePersistsPasswordHash(t *testing.T) {
 	t.Parallel()
@@ -494,4 +571,29 @@ func swapCaptchaCase(value string) string {
 		}
 	}
 	return result.String()
+}
+
+func TestUserStoreLoadRejectsCorruptEntries(t *testing.T) {
+	for name, data := range map[string]string{
+		"null":                    `[null]`,
+		"empty id":                `[{"username":"admin","role":"admin"}]`,
+		"duplicate id":            `[{"id":"dup","username":"admin","role":"admin"},{"id":"dup","username":"other","role":"user"}]`,
+		"duplicate name":          `[{"id":"one","username":"admin","role":"admin"},{"id":"two","username":"ADMIN","role":"user"}]`,
+		"bad role":                `[{"id":"one","username":"admin","role":"owner"}]`,
+		"occupied bootstrap name": `[{"id":"one","username":"admin","role":"user"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "users.json")
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := NewUserStore(path).Load(); err == nil {
+				t.Fatal("corrupt users file accepted")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || string(after) != data {
+				t.Fatalf("invalid file was overwritten: %v", err)
+			}
+		})
+	}
 }

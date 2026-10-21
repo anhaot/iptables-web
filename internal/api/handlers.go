@@ -274,6 +274,12 @@ func (h *Handler) ToggleRule(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
+	if err := h.validateStoredTargetOrder(existing.Backend, existing.Chain); err != nil {
+		h.restoreRulesSnapshot(snapshot)
+		_ = h.syncRuleTarget(existing.Backend, existing.Chain)
+		respondError(w, http.StatusBadRequest, "unsafe_order", err.Error())
+		return
+	}
 	if err := h.store.Save(); err != nil {
 		h.restoreRulesSnapshot(snapshot)
 		_ = h.syncRuleTarget(existing.Backend, existing.Chain)
@@ -457,6 +463,8 @@ func (h *Handler) GetChainRules(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) BackupRules(w http.ResponseWriter, r *http.Request) {
+	h.mutationMu.Lock()
+	defer h.mutationMu.Unlock()
 	requested := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("backend")))
 	if requested == "all" {
 		h.backupAllRules(w)
@@ -616,12 +624,16 @@ func (h *Handler) RestoreRules(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := h.executor.RestoreFor(backend, packetData); err != nil {
+		// A multi-table restore may have committed an earlier table before a
+		// later table fails. Do not assume a command error means no changes.
+		_ = h.executor.RestoreFor(backend, previousPacket)
 		respondError(w, http.StatusInternalServerError, "restore_error", err.Error())
 		return
 	}
 	if ipv6Data != "" {
 		if err := h.executor.RestoreIPv6(ipv6Data); err != nil {
 			_ = h.executor.RestoreFor(backend, previousPacket)
+			_ = h.executor.RestoreIPv6(previousIPv6)
 			respondError(w, http.StatusInternalServerError, "restore_error", err.Error())
 			return
 		}
@@ -633,13 +645,19 @@ func (h *Handler) RestoreRules(w http.ResponseWriter, r *http.Request) {
 				managedRules = append(managedRules, rule)
 			}
 		}
-	} else if err := h.executor.SyncRules(managedRules); err != nil {
-		_ = h.executor.RestoreFor(backend, previousPacket)
-		if previousIPv6 != "" {
-			_ = h.executor.RestoreIPv6(previousIPv6)
+	} else {
+		syncErr := h.executor.SyncRules(managedRules)
+		if syncErr == nil {
+			syncErr = h.executor.VerifyRules(managedRules)
 		}
-		respondError(w, http.StatusInternalServerError, "restore_error", "restored firewall could not be reconciled with managed metadata: "+err.Error())
-		return
+		if syncErr != nil {
+			_ = h.executor.RestoreFor(backend, previousPacket)
+			if previousIPv6 != "" {
+				_ = h.executor.RestoreIPv6(previousIPv6)
+			}
+			respondError(w, http.StatusInternalServerError, "restore_error", "restored firewall could not be reconciled with managed metadata: "+syncErr.Error())
+			return
+		}
 	}
 	if err := h.store.ReplaceAll(managedRules); err != nil {
 		_ = h.executor.RestoreFor(backend, previousPacket)
@@ -749,16 +767,19 @@ func (h *Handler) ClearManagedRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.executor.DeleteRules(rules); err != nil {
+		_ = h.executor.SyncRules(rules)
 		respondError(w, http.StatusInternalServerError, "firewall_error", "failed to remove all managed rules: "+err.Error())
 		return
 	}
 	if err := h.store.ReplaceAll(nil); err != nil {
+		_ = h.executor.SyncRules(rules)
 		respondError(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
 	if err := h.store.Save(); err != nil {
 		_ = h.store.ReplaceAll(rules)
-		respondError(w, http.StatusInternalServerError, "store_error", "rules were removed but clearing the store failed: "+err.Error())
+		_ = h.executor.SyncRules(rules)
+		respondError(w, http.StatusInternalServerError, "store_error", "clearing the store failed; attempted to restore managed rules: "+err.Error())
 		return
 	}
 	respondOK(w, map[string]interface{}{"removed": len(rules), "status": "cleared"})
@@ -795,157 +816,6 @@ type dockerWhitelistRequest struct {
 	HostPort      int    `json:"host_port"`
 	ContainerName string `json:"container_name"`
 	ContainerPort int    `json:"container_port"`
-}
-
-// CreateDockerWhitelist creates the ACCEPT and fallback DROP as one mutation.
-// A failed save or kernel sync restores the previous store and rule chain.
-func (h *Handler) CreateDockerWhitelist(w http.ResponseWriter, r *http.Request) {
-	h.mutationMu.Lock()
-	defer h.mutationMu.Unlock()
-	snapshot := h.snapshotRules()
-
-	var req dockerWhitelistRequest
-	if err := decodeJSONBody(w, r, &req, defaultJSONBodyLimit); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-	if req.HostPort < 1 || req.HostPort > 65535 || req.ContainerPort < 1 || req.ContainerPort > 65535 {
-		respondError(w, http.StatusBadRequest, "validation_error", "host_port and container_port must be 1-65535")
-		return
-	}
-	if strings.TrimSpace(req.Source) == "" {
-		respondError(w, http.StatusBadRequest, "validation_error", "source IPv4 address or CIDR is required")
-		return
-	}
-	if dockerAddressFamily(req.HostIP) != "ipv4" {
-		respondError(w, http.StatusBadRequest, "validation_error", "IPv6 Docker mappings are read-only")
-		return
-	}
-
-	proto := strings.ToLower(strings.TrimSpace(req.Protocol))
-	if proto == "" {
-		proto = "tcp"
-	}
-	port := fmt.Sprintf("%d", req.HostPort)
-	allowID, err := newID()
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "random_source_failed", "unable to generate a secure rule ID")
-		return
-	}
-	allowRule := &model.Rule{
-		ID: allowID, Backend: model.BackendPacket, Chain: "DOCKER_USER", Action: "ACCEPT",
-		Protocol: proto, Source: req.Source, OriginalDPort: port, Enabled: true, Position: 1,
-	}
-	hostIP := strings.Trim(strings.TrimSpace(req.HostIP), "[]")
-	if hostIP != "" && hostIP != "0.0.0.0" {
-		allowRule.OriginalDest = hostIP
-	}
-	if err := allowRule.Validate(); err != nil {
-		respondError(w, http.StatusBadRequest, "validation_error", err.Error())
-		return
-	}
-	if strings.Contains(allowRule.Source, ":") {
-		respondError(w, http.StatusBadRequest, "validation_error", "IPv4 mapping requires an IPv4 source address or CIDR")
-		return
-	}
-
-	path := h.executor.DockerPathStatus()
-	if !path.Usable {
-		respondError(w, http.StatusConflict, "docker_path_unavailable", path.Message)
-		return
-	}
-
-	rules, err := h.store.ListByTarget(model.BackendPacket, "DOCKER_USER")
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "store_error", err.Error())
-		return
-	}
-	maxPosition := 0
-	var existingDrop *model.Rule
-	for _, existing := range rules {
-		if existing.Position > maxPosition {
-			maxPosition = existing.Position
-		}
-		if existing.Enabled && allowRule.OriginalDest != "" && existing.OriginalDest == "" &&
-			strings.EqualFold(existing.Protocol, proto) && existing.OriginalDPort == port &&
-			(strings.EqualFold(existing.Action, "DROP") || strings.EqualFold(existing.Action, "REJECT")) && existing.Source == "" && existing.Dest == "" {
-			respondError(w, http.StatusConflict, "legacy_broad_docker_rule", "an enabled legacy rule already blocks this port on every host IP; delete or scope that rule before creating an address-specific whitelist")
-			return
-		}
-		if strings.EqualFold(existing.Protocol, proto) && existing.OriginalDPort == port && existing.OriginalDest == allowRule.OriginalDest {
-			if existing.Enabled && strings.EqualFold(existing.Action, "ACCEPT") && existing.Source == allowRule.Source {
-				respondOK(w, map[string]interface{}{"created": false, "allow_rule": existing})
-				return
-			}
-			if existing.Enabled && (strings.EqualFold(existing.Action, "DROP") || strings.EqualFold(existing.Action, "REJECT")) && existing.Source == "" && existing.Dest == "" {
-				existingDrop = existing
-			}
-		}
-	}
-
-	allowRule.Position = maxPosition + 1
-	if existingDrop != nil {
-		allowRule.Position = existingDrop.Position
-	}
-	endpoint := dockerRuleEndpoint(req.HostIP, req.HostPort, req.ContainerName, req.ContainerPort)
-	allowRule.Desc = fmt.Sprintf("允许 %s 访问 %s", allowRule.Source, endpoint)
-	if err := allowRule.Validate(); err != nil {
-		h.restoreRulesSnapshot(snapshot)
-		respondError(w, http.StatusBadRequest, "validation_error", err.Error())
-		return
-	}
-	if err := h.store.Create(allowRule); err != nil {
-		respondError(w, http.StatusInternalServerError, "store_error", err.Error())
-		return
-	}
-
-	createdDrop := false
-	var dropRule *model.Rule
-	if existingDrop == nil {
-		dropID, err := newID()
-		if err != nil {
-			h.restoreRulesSnapshot(snapshot)
-			respondError(w, http.StatusInternalServerError, "random_source_failed", "unable to generate a secure rule ID")
-			return
-		}
-		dropRule = &model.Rule{
-			ID: dropID, Backend: model.BackendPacket, Chain: "DOCKER_USER", Action: "DROP",
-			Protocol: proto, OriginalDest: allowRule.OriginalDest, OriginalDPort: port, Enabled: true, Position: maxPosition + 2,
-			Desc: "阻止其他来源访问 " + endpoint,
-		}
-		if err := dropRule.Validate(); err != nil {
-			h.restoreRulesSnapshot(snapshot)
-			respondError(w, http.StatusBadRequest, "validation_error", err.Error())
-			return
-		}
-		if err := h.store.Create(dropRule); err != nil {
-			h.restoreRulesSnapshot(snapshot)
-			respondError(w, http.StatusInternalServerError, "store_error", err.Error())
-			return
-		}
-		createdDrop = true
-	} else {
-		dropRule = existingDrop
-	}
-
-	if err := h.store.Save(); err != nil {
-		h.restoreRulesSnapshot(snapshot)
-		respondError(w, http.StatusInternalServerError, "store_error", err.Error())
-		return
-	}
-	if err := h.syncRuleTarget(model.BackendPacket, "DOCKER_USER"); err != nil {
-		h.restoreRulesSnapshot(snapshot)
-		_ = h.syncRuleTarget(model.BackendPacket, "DOCKER_USER")
-		respondError(w, http.StatusInternalServerError, "iptables_error", fmt.Sprintf("failed to apply Docker whitelist: %v", err))
-		return
-	}
-
-	respondCreated(w, map[string]interface{}{
-		"created":      true,
-		"created_drop": createdDrop,
-		"allow_rule":   allowRule,
-		"drop_rule":    dropRule,
-	})
 }
 
 func dockerRuleEndpoint(hostIP string, hostPort int, containerName string, containerPort int) string {
@@ -1306,7 +1176,10 @@ func (h *Handler) syncRuleTarget(backend, chain string) error {
 	if err != nil {
 		return err
 	}
-	return h.executor.SyncRules(rules)
+	if err := h.executor.SyncRules(rules); err != nil {
+		return err
+	}
+	return h.executor.VerifyRules(rules)
 }
 
 func (h *Handler) syncRuleTargets(rules ...*model.Rule) error {
@@ -1360,8 +1233,8 @@ func firewallVersion(name string) string {
 	var bin string
 	var args []string
 	switch name {
-	case "iptables":
-		bin, args = "iptables", []string{"--version"}
+	case "iptables", "iptables-nft", "iptables-legacy":
+		bin, args = name, []string{"--version"}
 	case "nftables":
 		bin, args = "nft", []string{"--version"}
 	default:

@@ -3,17 +3,104 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/pem"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"iptables-web/internal/model"
 	"iptables-web/internal/store"
 )
+
+func TestOldAgentBatchErrorsAreStructuredWithoutRetry(t *testing.T) {
+	for _, path := range []string{"/api/v1/docker/whitelist/batch", "/api/v1/rules/batch-delete", "/api/v1/rules"} {
+		for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+			t.Run(path+http.StatusText(status), func(t *testing.T) {
+				var requests atomic.Int32
+				remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests.Add(1)
+					http.Error(w, "404 page not found", status)
+				}))
+				defer remote.Close()
+				id := "00112233445566778899aabb"
+				hosts := store.NewHostStore(filepath.Join(t.TempDir(), "hosts.json"), "test-master-key-at-least-32-characters")
+				if err := hosts.Create(&model.ManagedHost{ID: id, Name: "node", BaseURL: remote.URL, Enabled: true}, "test-key"); err != nil {
+					t.Fatal(err)
+				}
+				h := NewHostHandler(hosts)
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/hosts/"+id+"/api"+strings.TrimPrefix(path, "/api/v1"), strings.NewReader(`{}`))
+				req = req.WithContext(context.WithValue(req.Context(), sessionKey, &store.Session{Role: "admin"}))
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if requests.Load() != 1 {
+					t.Fatalf("write requests=%d, must not retry or fall back", requests.Load())
+				}
+				if path == "/api/v1/rules" {
+					if rec.Code != status {
+						t.Fatalf("ordinary rule response unexpectedly translated: %d", rec.Code)
+					}
+					return
+				}
+				if rec.Code != http.StatusConflict || !json.Valid(rec.Body.Bytes()) || !strings.Contains(rec.Body.String(), `"code":"agent_upgrade_required"`) {
+					t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+func TestInvalidBatchNeverStartsRemoteWrites(t *testing.T) {
+	var writes atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writes.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer remote.Close()
+	id := "00112233445566778899aabb"
+	hosts := store.NewHostStore(filepath.Join(t.TempDir(), "hosts.json"), "test-master-key-at-least-32-characters")
+	if err := hosts.Create(&model.ManagedHost{ID: id, Name: "node", BaseURL: remote.URL, Enabled: true}, "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHostHandler(hosts)
+	for _, tc := range []struct {
+		name, lastID string
+		status       int
+	}{
+		{"duplicate", id, http.StatusBadRequest},
+		{"invalid", "invalid", http.StatusBadRequest},
+		{"unauthorized", "112233445566778899aabbcc", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"host_ids":["` + id + `","` + tc.lastID + `"],"rule":{"chain":"INPUT","action":"ACCEPT","protocol":"tcp","dport":"8443","enabled":true}}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/hosts/batch/rules", strings.NewReader(body))
+			req = req.WithContext(context.WithValue(req.Context(), sessionKey, &store.Session{Username: "operator", Role: "user", HostIDs: []string{id}}))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			// A rejected handler must not leave work running after its response.
+			time.Sleep(50 * time.Millisecond)
+			if writes.Load() != 0 {
+				t.Fatalf("rejected batch sent %d writes", writes.Load())
+			}
+		})
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/hosts/batch/rules", strings.NewReader(`{"host_ids":["`+id+`"],"rule":{"chain":"INPUT","action":"ACCEPT"}}`))
+	request = request.WithContext(context.WithValue(request.Context(), sessionKey, &store.Session{Role: "user", HostIDs: []string{id}}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, request)
+	if rec.Code != http.StatusOK || writes.Load() != 1 {
+		t.Fatalf("valid batch status=%d writes=%d", rec.Code, writes.Load())
+	}
+}
 
 func TestAllowedRemoteOperationIsExplicit(t *testing.T) {
 	allowed := []struct{ method, path string }{
@@ -23,6 +110,8 @@ func TestAllowedRemoteOperationIsExplicit(t *testing.T) {
 		{http.MethodPost, "/api/v1/rules/rule-id/toggle"},
 		{http.MethodGet, "/api/v1/system/chains/INPUT/rules"},
 		{http.MethodPost, "/api/v1/docker/whitelist"},
+		{http.MethodPost, "/api/v1/docker/whitelist/batch"},
+		{http.MethodPost, "/api/v1/rules/batch-delete"},
 	}
 	for _, test := range allowed {
 		if !allowedRemoteOperation(test.method, test.path) {
@@ -31,6 +120,9 @@ func TestAllowedRemoteOperationIsExplicit(t *testing.T) {
 	}
 	denied := []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/users"},
+		{http.MethodGet, "/api/v1/monitoring-policy"},
+		{http.MethodPut, "/api/v1/monitoring-policy"},
+		{http.MethodGet, "/api/v1/docker/whitelist/batch"},
 		{http.MethodGet, "/api/v1/auth/session"},
 		{http.MethodPost, "/api/v1/assistant/generate"},
 		{http.MethodPatch, "/api/v1/rules/rule-id"},

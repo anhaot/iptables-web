@@ -39,9 +39,37 @@ func (s *JSONStore) Load() error {
 		s.rules = []*model.Rule{}
 		return nil
 	}
-	if err := json.Unmarshal(data, &s.rules); err != nil {
-		return err
+	var rules []*model.Rule
+	if err := json.Unmarshal(data, &rules); err != nil {
+		return fmt.Errorf("decode rules file: %w", err)
 	}
+	seen := make(map[string]bool, len(rules))
+	for _, rule := range rules {
+		if rule == nil || rule.ID == "" || seen[rule.ID] {
+			return fmt.Errorf("rules file contains a null rule or an empty/duplicate rule id")
+		}
+		seen[rule.ID] = true
+		// Older files may omit positions; retain the existing normalization.
+		if rule.Position < 1 {
+			rule.Position = 1
+		}
+		// Preserve the two explicit startup migrations: the controller backs
+		// up/removes legacy firewalld metadata and repairs the old Docker
+		// dport+original_dport combination before applying packet rules.
+		if model.NormalizeBackend(rule.Backend) == "firewalld" {
+			continue
+		}
+		checked := *rule
+		if checked.OriginalDPort != "" {
+			checked.DPort = ""
+		}
+		if err := checked.Validate(); err != nil {
+			return fmt.Errorf("invalid stored rule %s: %w", rule.ID, err)
+		}
+		checked.DPort = rule.DPort
+		*rule = checked
+	}
+	s.rules = rules
 	s.normalizePositionsLocked()
 	return nil
 }
@@ -246,6 +274,13 @@ func (s *JSONStore) ReplaceAll(rules []*model.Rule) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	seen := make(map[string]bool, len(rules))
+	for _, rule := range rules {
+		if rule == nil || rule.ID == "" || seen[rule.ID] {
+			return fmt.Errorf("replacement contains a null rule or an empty/duplicate rule id")
+		}
+		seen[rule.ID] = true
+	}
 	s.rules = cloneRuleSlice(rules)
 	s.normalizePositionsLocked()
 	return nil
@@ -281,8 +316,10 @@ func (s *JSONStore) compactTarget(backend, chain string) {
 		return chainRules[i].Position < chainRules[j].Position
 	})
 	for i, r := range chainRules {
-		r.Position = i + 1
-		r.UpdatedAt = time.Now()
+		if r.Position != i+1 {
+			r.Position = i + 1
+			r.UpdatedAt = time.Now()
+		}
 	}
 }
 

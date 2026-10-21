@@ -1,6 +1,6 @@
 # 部署与配置
 
-本文给出可直接执行的中心端和 Agent 部署流程，覆盖发布包脚本、源码、完全手动 systemd、Docker Compose、升级、回滚和卸载。日常检查、备份恢复和故障定位见[运维手册](operations.md)，多主机安全边界见[Agent 纳管与按主机授权](multi-host.md)。
+本文给出可直接执行的中心端和 Agent 部署流程，覆盖发布包脚本、源码、完全手动 systemd、升级、回滚和卸载。日常检查、备份恢复和故障定位见[运维手册](operations.md)，多主机安全边界见[Agent 纳管与按主机授权](multi-host.md)。
 
 ## 1. 选择部署方式
 
@@ -9,7 +9,6 @@
 | 普通生产主机 | 发布包 `install-binary.sh` | 发布包 `install-agent.sh` | 首选；不需要 Go，自动校验 systemd、启动和健康状态 |
 | 内网源码环境 | `scripts/install.sh` | 仍使用发布包 Agent | 源码安装会低并发编译，再走同一事务安装流程 |
 | 受控变更平台 | 手动 systemd | 手动 systemd | 使用仓库 `deploy/systemd/` 模板，便于配置管理系统审计 |
-| 容器化中心 | Compose | systemd | 容器仅推荐运行中心；Agent 直接管理目标宿主机，使用 systemd 更清楚可靠 |
 
 安装脚本只管理程序文件、私有配置目录和自己的 systemd unit。它们不会执行 `firewall-cmd`、不会开放端口、不会 flush 链，也不会删除其他工具的规则。
 
@@ -30,7 +29,7 @@
 
 ## 2. 部署前检查
 
-支持 Linux amd64 发布包，systemd 脚本适用于 Ubuntu 20.04+、Debian 11+、RHEL/CentOS/Rocky/AlmaLinux 7+ 和麒麟 V10 等常见发行版。运行时需要 root，或容器中的 `NET_ADMIN`、`NET_RAW` 能力。
+支持 Linux amd64 发布包，systemd 脚本适用于 Ubuntu 20.04+、Debian 11+、RHEL/CentOS/Rocky/AlmaLinux 7+ 和麒麟 V10 等常见发行版。安装及运行时使用 root 权限，以便管理宿主机防火墙。
 
 先安装最小运行依赖。发行版的软件包名称可能随版本变化，以下是常见命令：
 
@@ -43,7 +42,7 @@ sudo apt-get install -y iptables ca-certificates curl
 sudo dnf install -y iptables-services ca-certificates curl
 ```
 
-发布包脚本还需要 `tar`、`sha256sum`、`systemctl` 和 `systemd-analyze`。源码部署另外需要 Git 和 Go；容器部署需要 Docker Engine 与 Compose 插件。`jq` 只用于可选的端到端烟测，不是服务运行依赖。
+发布包脚本还需要 `tar`、`sha256sum`、`systemctl` 和 `systemd-analyze`。源码部署另外需要 Git 和 Go。路径校验需要 GNU coreutils 中的 `realpath`。`jq` 只用于可选的端到端烟测，不是服务运行依赖。
 
 ```bash
 uname -m
@@ -121,7 +120,7 @@ sudo LISTEN_ADDR=127.0.0.1:33801 \
 | `SKIP_FIREWALL_DEP_INSTALL` | `false` | 依赖已离线准备时跳过包管理器 |
 | `DRY_RUN` | `false` | 只渲染并校验 unit，不写系统 |
 
-变更默认目录时应使用绝对路径，并让 `DATA_DIR`、EnvironmentFile、systemd 的 `ReadWritePaths` 和备份方案保持一致。脚本会拒绝根目录、系统顶层目录和带控制字符的危险路径。
+变更默认目录时应使用绝对路径，并让 `DATA_DIR`、EnvironmentFile、systemd 的 `ReadWritePaths` 和备份方案保持一致。脚本会拒绝根目录、过宽的系统目录、系统运行目录及带控制字符的路径。路径必须是规范绝对路径，不得包含 `..`、重复或尾部斜杠，也不能经过符号链接；DATA_DIR/CONFIG_DIR/INSTALL_DIR 必须是程序专用目录，不能指向 `/usr/local/bin` 等共享目录。BIN_DIR 可使用 `/usr/local/bin`。卸载同样检查路径，避免通过别名误删上层目录。
 
 脚本会：
 
@@ -171,6 +170,8 @@ make integration-test
 该脚本强制使用开发后端和回环监听，验证主动申请、批准、受保护回连、Agent 无页面边界、远程规则增删、审计以及密钥落盘检查，不会执行系统防火墙命令。它属于源码仓库的开发验证工具，不进入面向目标机的 Release 压缩包；正式包由发布工作流在上传前执行同等构建与离线校验。
 
 ## 4. 从源码部署中心端
+
+本地构建发布压缩包还需要 Python 3，用于公开文件边界和文档检查；发布包目标机器不需要 Python 或 Go。
 
 源码要求 Go 1.26+，仓库声明的工具链为 Go 1.26.5：
 
@@ -332,6 +333,7 @@ LOG_LEVEL="info"
 | --- | --- | --- |
 | `LISTEN_ADDR` | `0.0.0.0:33801` | HTTP 监听 `host:port` |
 | `RULES_FILE` | 规则目录下 `rules.json` | 中心本机托管规则 |
+| `monitoring-policy.json` | 与 `RULES_FILE` 同目录，无独立环境变量 | 在线检测全局设置（0600）；在“用户与权限”中修改，主机可独立覆盖，详见[多主机手册](multi-host.md#在线检测设置) |
 | `USERS_FILE` | 同目录 `users.json` | 用户数据；安全策略保存在同目录 `security-policy.json` |
 | `HOSTS_FILE` | 同目录 `hosts.json` | 远程主机清单和加密凭据 |
 | `API_KEYS_FILE` | 同目录 `api-keys.json` | 动态访问密钥 ID、名称和单向摘要 |
@@ -358,6 +360,8 @@ LOG_LEVEL="info"
 | `FIREWALL_BACKEND` | `auto` | 与中心相同的 iptables 后端选择 |
 
 Agent 没有用户、认证会话、中心主机清单、访问密钥管理或任意 URL 代理，不能把这些能力加入远程代理。
+
+显式选择 `FIREWALL_BACKEND=iptables-legacy` 时需要 `iptables-legacy`、`iptables-legacy-save`、`iptables-legacy-restore`；选择 `iptables-nft` 时需要对应的 nft 兼容命令。IPv6 备份/恢复使用同家族的 `ip6tables-legacy-*` 或 `ip6tables-nft-*`。`auto` 与 `iptables` 使用系统默认 alternatives；显式家族缺失时启动失败，不回退到默认后端。
 
 ## 8. 网络和 HTTPS
 
@@ -489,115 +493,23 @@ sudo MANAGER_URL=https://10.0.0.5:3443 \
 
 安装器会将 CA 复制为 `/etc/iptables-web-agent/manager-ca.pem`，权限设为 `0600`，升级失败时一并回滚。禁止使用跳过证书校验的配置；程序也不提供 `InsecureSkipVerify` 开关。
 
-## 9. Docker Compose 部署中心端
+## 9. 可选的 Docker 发布端口发现
 
-容器模式需要 Docker Engine 24+ 与 Compose v2 插件。先确认实际使用的是 `docker compose`，而不是已停止维护的旧版 `docker-compose`：
+中心和 Agent 均直接安装为宿主机 systemd 服务。只有被管理主机确实运行 Docker、需要识别其发布端口时，才需要该主机具有可访问的 Docker Unix socket 或 Docker CLI；普通防火墙管理不依赖 Docker。
 
-```bash
-docker version
-docker compose version
-```
-
-Compose 使用 host network 和宿主机防火墙能力，安全影响接近直接以 root 运行中心端。镜像来源、Compose 文件和 Docker 管理权限都应纳入生产变更控制。
-
-### 9.1 从源码构建
+程序先通过 `/var/run/docker.sock` 读取 Docker 的容器端口信息，再尝试 `docker` CLI；两者均不可用时返回空映射列表，不会把普通宿主机监听端口猜成容器发布端口。服务仍可管理 INPUT、OUTPUT 等托管规则。
 
 ```bash
-git clone https://github.com/anhaot/iptables-web.git
-cd iptables-web
-printf 'IPTABLES_WEB_LISTEN_ADDR=0.0.0.0:33801\nTZ=Asia/Shanghai\n' > .env
-docker compose config
-docker compose build --build-arg BUILD_PROCS=2
-docker compose up -d
-docker compose ps
-docker compose logs --tail=100 iptables-web
-curl --fail http://127.0.0.1:33801/api/v1/health
+# 在实际运行 Docker 的被管理主机上检查
+sudo test -S /var/run/docker.sock
+sudo docker ps --format 'table {{.Names}}\t{{.Ports}}'
 ```
 
-Compose 使用 host network，使容器内 iptables 操作作用于宿主机网络命名空间；同时仅增加 `NET_ADMIN`、`NET_RAW`。默认限制为 1 CPU、512 MiB 内存，构建并发为 2。可按规模调整，但不要移除 host network 后误以为仍在管理宿主机。
-
-Compose 可从项目目录的 `.env` 读取下列非敏感覆盖项：
-
-| `.env` 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `IPTABLES_WEB_LISTEN_ADDR` | `0.0.0.0:33801` | 中心监听地址 |
-| `IPTABLES_WEB_LOG_LEVEL` | `info` | 日志级别 |
-| `IPTABLES_WEB_AUTH_ENABLED` | `true` | 生产不得关闭 |
-| `IPTABLES_WEB_FIREWALL_BACKEND` | `auto` | 防火墙后端 |
-| `IPTABLES_WEB_DEV_MODE` | `false` | 仅测试；生产不得启用 |
-| `TZ` | `Asia/Shanghai` | 容器时区 |
-
-不要把中心访问密钥或 Agent Key 写入 `.env`。动态中心访问密钥应在页面创建；远程 Agent 凭据由系统自动交换。`HOST_CREDENTIAL_KEY` 通常也不需要设置，容器会在数据卷中自动创建 `/data/hosts.key`。
-
-### 9.2 从发布包运行（不在目标机编译 Go）
-
-发布包含预编译二进制和专用运行时 Dockerfile：
-
-```bash
-tar -xzf iptables-web-<版本>-linux-amd64.tar.gz
-cd iptables-web-<版本>-linux-amd64
-docker compose -f docker-compose.release.yml config
-docker compose -f docker-compose.release.yml up -d --build
-docker compose -f docker-compose.release.yml ps
-docker compose -f docker-compose.release.yml logs --tail=100 iptables-web
-curl --fail http://127.0.0.1:33801/api/v1/health
-```
-
-发布包不包含完整 Go 源码及源码构建用 `Dockerfile`/`docker-compose.yml`，只提供面向预编译二进制的 `Dockerfile.release` / `docker-compose.release.yml`。
-
-### 9.3 Docker 端口发现
-
-如需自动发现宿主机 Docker 发布端口，取消 Compose 中的挂载注释：
-
-```yaml
-- /var/run/docker.sock:/var/run/docker.sock:ro
-```
-
-Docker socket 即使只读挂载，也等同宿主机高权限接口。仅在确有需要时启用，并保护镜像和 Compose 文件。
-
-### 9.4 容器数据、升级和回滚
-
-数据位于 named volume `iptables-web-data`。先用 Compose 查出卷的真实名称，不要假设项目目录改变后仍叫同一个名字：
-
-```bash
-DATA_VOLUME="$(docker inspect iptables-web --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')"
-test -n "$DATA_VOLUME"
-docker volume inspect "$DATA_VOLUME"
-```
-
-升级前创建一个只读卷备份。下面使用当前镜像中的 Alpine 工具，不启动 iptables-web 进程：
-
-```bash
-docker compose stop iptables-web
-mkdir -p ./backup-data
-DATA_VOLUME="$(docker inspect iptables-web --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')"
-docker run --rm --entrypoint sh \
-  -v "$DATA_VOLUME:/source:ro" -v "$PWD/backup-data:/backup" \
-  "$(docker inspect iptables-web --format '{{.Config.Image}}')" \
-  -c 'cd /source && tar -czf /backup/iptables-web-data.tar.gz .'
-docker inspect iptables-web --format '{{.Image}}' > ./backup-data/previous-image-id.txt
-docker compose up -d --build
-curl --fail http://127.0.0.1:33801/api/v1/health
-```
-
-`docker compose up -d --build` 失败时，先恢复上一版 Git/发布包和 Compose 文件再重新构建。若必须恢复数据，确认备份文件无误后停止服务，并清空这个已精确解析出的数据卷再解压：
-
-```bash
-docker compose stop iptables-web
-DATA_VOLUME="$(docker inspect iptables-web --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')"
-docker run --rm --entrypoint sh \
-  -v "$DATA_VOLUME:/data" -v "$PWD/backup-data:/backup:ro" \
-  "$(docker inspect iptables-web --format '{{.Config.Image}}')" \
-  -c 'find /data -mindepth 1 -delete && tar -xzf /backup/iptables-web-data.tar.gz -C /data'
-docker compose start iptables-web
-curl --fail http://127.0.0.1:33801/api/v1/health
-```
-
-恢复会覆盖卷中当前数据，必须在容器已停止、`DATA_VOLUME` 非空且已检查 `docker volume inspect` 后执行。`hosts.json` 与 `hosts.key` 必须来自同一份备份，否则中心无法解密 Agent 凭据。
-
-容器模式推荐只部署中心。Agent 容器需要直接管理目标宿主机网络、持久化身份并限制中心回连，错误的 network/capability 配置很容易只修改容器自身规则，因此本项目提供并推荐 systemd Agent。
+Docker socket 本身具有很高的宿主机权限，应保留其原有访问控制，不要改成全员可写，也不要为本程序开放未认证的 Docker TCP API。Docker 发布端口访问控制、DNAT 前后端口区别和 DOCKER-USER 链路排障见[运维手册](operations.md)。
 
 ## 10. 升级与回滚
+
+当前同步、清空、回滚和卸载只删除带 `iptables-web:<rule-id>` 所有权注释的规则，启动时也不会自动删除无注释的同条件规则。如果从早期无所有权标记的版本升级，先备份并人工核对残留规则，再安排维护窗口处理；不要通过 flush 系统链来迁移。
 
 ### 10.1 脚本升级
 
@@ -674,7 +586,6 @@ sudo bash uninstall-agent.sh
 - 新增主机和动态访问密钥无需重启即可生效；
 - `hosts.json` 与 `hosts.key` 一起备份，Agent identity/hash 一起备份；
 - 日志、审计、列表 API 和磁盘中没有访问密钥明文；
-- Docker 模式确认 host network、capabilities、数据卷和资源限制均符合预期。
 
 建议把以下输出保存到变更记录中，但不要收集 EnvironmentFile、`hosts.key`、Agent identity 或任何一次性明文密钥：
 
@@ -701,7 +612,6 @@ ss -lntp | grep -E ':33801|:33802'
 | 批准 Agent 时回连失败 | `AGENT_PUBLIC_URL`、目标机 ACL、中心到 Agent 的 `curl` | 只允许中心 IP 访问 Agent；HTTPS 时检查证书 IP SAN 和对应 CA |
 | Agent 正常上报但显示“回连异常” | 中心到目标机的路由/ACL、Agent 受保护状态接口 | 这表示心跳方向正常、反向连接异常，不要通过重复安装替代网络诊断 |
 | 重启后中心无法解密主机凭据 | `hosts.json` 与 `hosts.key` 是否来自同一备份 | 恢复成对文件；外部 `HOST_CREDENTIAL_KEY` 部署必须恢复原值 |
-| Compose 容器只改了容器自身规则 | `docker inspect iptables-web --format '{{.HostConfig.NetworkMode}}'` | 必须为 `host`，并保留 `NET_ADMIN`、`NET_RAW`；随后重新验收宿主机规则 |
 | 页面能打开但无法执行管理操作 | 是否仍使用初始密码、会话角色、本机/主机授权 | 先完成首次改密，再检查管理员或普通用户的 `local`/远程主机授权 |
 
 运行期故障、Docker 链路诊断、账户解锁、备份恢复和高风险清理见[运维与排障](operations.md)。

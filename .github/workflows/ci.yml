@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check source boundaries, documentation, and formatting
+        run: |
+          python3 scripts/check-source.py
+          git diff --check
+          diff -qr web assets/web
+          test -z "$(gofmt -l cmd internal assets/embed.go)"
+      - name: Check frontend and installer scripts
+        run: |
+          node scripts/ui-logic-test.js
+          for script in web/js/*.js web/js/components/*.js; do node --check "$script"; done
+          for script in scripts/*.sh; do bash -n "$script"; done
+          bash scripts/install-path-test.sh
+      - name: Test Go and check races
+        run: |
+          go test ./...
+          go test -race ./...
+          go vet ./...
+      - name: Check isolated controller and Agent flow
+        run: bash scripts/integration-smoke.sh

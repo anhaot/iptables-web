@@ -37,42 +37,14 @@ func (e *Executor) DockerPathStatus() DockerPathStatus {
 	return DockerPathStatus{Backend: e.BackendName(), Message: "当前后端无法确认 Docker 转发链是否生效"}
 }
 
-// DeleteRules removes only the rules described by the application store.
-// It never flushes a whole system chain and is used by the clean uninstaller.
+// DeleteRules only removes ownership-tagged rules. A missing owned rule must
+// never cause an identically shaped external rule to be deleted instead.
 func (e *Executor) DeleteRules(rules []*model.Rule) error {
-	var deleteErrors []error
-	for _, rule := range rules {
-		backend, backendErr := e.backendForRule(rule)
-		if backendErr != nil {
-			deleteErrors = append(deleteErrors, backendErr)
-			continue
-		}
-		exists, existsErr := backend.RuleExists(rule)
-		if existsErr != nil {
-			deleteErrors = append(deleteErrors, existsErr)
-			continue
-		}
-		// Always invoke the backend's idempotent owned-rule deletion. Some
-		// backends do not expose ownership-aware existence checks, while the
-		// iptables backend uses the result below only to decide whether a
-		// one-time legacy (uncommented) rule also needs cleanup.
-		err := backend.DeleteRule(rule)
-		if err == nil && !exists {
-			if legacy, ok := backend.(interface{ DeleteLegacyRule(*model.Rule) error }); ok {
-				err = legacy.DeleteLegacyRule(rule)
-			}
-		}
-		if err != nil {
-			deleteErrors = append(deleteErrors, fmt.Errorf("delete managed rule %s (%s/%s): %w",
-				rule.ID, model.NormalizeBackend(rule.Backend), rule.Chain, err))
-		}
-	}
-	return errors.Join(deleteErrors...)
+	return e.DeleteOwnedRules(rules)
 }
 
 // DeleteOwnedRules removes only the comment-tagged rules created by this
-// application. Unlike DeleteRules, it deliberately has no legacy untagged
-// fallback and is therefore suitable for the independently installed Agent.
+// application, including rules represented by disabled records.
 func (e *Executor) DeleteOwnedRules(rules []*model.Rule) error {
 	var deleteErrors []error
 	for _, rule := range rules {
@@ -81,38 +53,11 @@ func (e *Executor) DeleteOwnedRules(rules []*model.Rule) error {
 			err = backend.DeleteRule(rule)
 		}
 		if err != nil {
-			deleteErrors = append(deleteErrors, fmt.Errorf("delete Agent-owned rule %s (%s/%s): %w",
+			deleteErrors = append(deleteErrors, fmt.Errorf("delete owned rule %s (%s/%s): %w",
 				rule.ID, model.NormalizeBackend(rule.Backend), rule.Chain, err))
 		}
 	}
 	return errors.Join(deleteErrors...)
-}
-
-// MigrateLegacyRules removes unowned rules represented by the persisted store
-// before SyncRules recreates them with ownership comments. It is intentionally
-// run only during startup migration, never for newly submitted rules.
-func (e *Executor) MigrateLegacyRules(rules []*model.Rule) error {
-	var migrationErrors []error
-	for _, rule := range rules {
-		backend, err := e.backendForRule(rule)
-		if err != nil {
-			migrationErrors = append(migrationErrors, err)
-			continue
-		}
-		exists, err := backend.RuleExists(rule)
-		if err != nil || exists {
-			if err != nil {
-				migrationErrors = append(migrationErrors, err)
-			}
-			continue
-		}
-		if legacy, ok := backend.(interface{ DeleteLegacyRule(*model.Rule) error }); ok {
-			if err := legacy.DeleteLegacyRule(rule); err != nil {
-				migrationErrors = append(migrationErrors, err)
-			}
-		}
-	}
-	return errors.Join(migrationErrors...)
 }
 
 // NewExecutor detects and initializes the best available firewall backend.

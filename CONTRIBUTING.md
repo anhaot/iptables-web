@@ -4,7 +4,7 @@
 
 ## 开始之前
 
-1. 先阅读[文档中心](docs/index.md)和[架构与实现](docs/architecture.md)。
+1. 先完整阅读[开发交接](docs/development-handoff.md)，执行 `git status --short` 保留现有成果，再阅读[文档中心](docs/index.md)和[架构与实现](docs/architecture.md)。
 2. 确认问题在当前代码上可复现，并记录操作系统、防火墙后端、部署方式和最小复现步骤。
 3. 安全问题不要在公开问题中包含真实 IP、规则集、密码、Token、API Key 或 `users.json`。
 
@@ -34,10 +34,13 @@ go run ./cmd/server
 
 ```bash
 gofmt -w <changed-go-files>
+python3 scripts/check-source.py
 GOCACHE=/tmp/iptables-web-go-cache go test ./...
 go test -race ./...
 go vet ./...
 node scripts/ui-logic-test.js
+bash scripts/install-path-test.sh
+for script in scripts/*.sh; do bash -n "$script" || exit; done
 bash scripts/integration-smoke.sh
 ```
 
@@ -62,7 +65,7 @@ VERSION=0.1.0 bash scripts/build-package.sh
 bash scripts/verify-package.sh dist/iptables-web-0.1.0-linux-amd64.tar.gz
 ```
 
-构建脚本会同步前端、运行测试、生成 Linux amd64 二进制、安装脚本、文档、版本清单和 SHA-256。离线验证不会启动服务或访问防火墙。
+构建需要 Python 3 检查文档链接与公开文件边界；目标机安装不需要 Python 或 Go。构建脚本会同步前端、运行测试、生成 Linux amd64 二进制、安装脚本、文档、版本清单和 SHA-256。离线验证不会启动服务或访问防火墙。
 
 正式版本使用 `v主版本.次版本.修订版本` Tag。推送版本 Tag 后，GitHub Actions 自动构建并创建 Release。`dist/` 只用于本地构建，不提交到 Git。
 
@@ -84,6 +87,8 @@ bash scripts/verify-package.sh dist/iptables-web-0.1.0-linux-amd64.tar.gz
 - 日常操作、备份恢复和事故处置放在 `docs/operations.md`。
 - 内部组件、数据文件和设计边界放在 `docs/architecture.md`。
 - 尚未实现的功能只放在 `docs/roadmap.md`，不要写成现有能力。
+
+CI 会执行上述源码、文档、前端、安装路径、Go 普通/竞态和隔离联调检查。公开前还应检查凭据与 Git 历史；详细范围见[开源范围与验证](docs/open-source.md)。
 
 ## 仓库边界
 

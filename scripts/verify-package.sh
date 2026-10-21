@@ -25,12 +25,10 @@ for required in \
 	'/uninstall-agent.sh' \
 	'/uninstall.sh' \
 	'/README.md' \
+	'/LICENSE' \
 	'/docs/deployment.md' \
 	'/docs/images/dashboard.png' \
 	'/scripts/install-lib.sh' \
-	'/scripts/healthcheck.sh' \
-	'/Dockerfile.release' \
-	'/docker-compose.release.yml' \
 	'/deploy/systemd/iptables-web.service' \
 	'/deploy/systemd/iptables-web-agent.service' \
 	'/VERSION'; do
@@ -38,14 +36,21 @@ for required in \
 done
 
 for forbidden in \
+	'/docs/interview-guide.md' \
+	'/xmjs.md' \
+	'/scripts/check-source.py' \
 	'/scripts/build-package.sh' \
 	'/scripts/verify-package.sh' \
 	'/scripts/integration-smoke.sh' \
 	'/scripts/ui-logic-test.js' \
+	'/scripts/install-path-test.sh' \
+	'/scripts/healthcheck.sh' \
 	'/Dockerfile' \
-	'/docker-compose.yml'; do
+	'/Dockerfile.release' \
+	'/docker-compose.yml' \
+	'/docker-compose.release.yml'; do
 	if printf '%s\n' "${contents}" | grep -q "${forbidden}$"; then
-		echo "Package contains source-only file ${forbidden}" >&2
+		echo "Package contains unsupported or source-only file ${forbidden}" >&2
 		exit 1
 	fi
 done
@@ -57,9 +62,11 @@ package_root="$(find "${tmp_dir}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 binary="${package_root}/bin/iptables-web"
 agent_binary="${package_root}/bin/iptables-web-agent"
 
-bash -n "${package_root}/install-binary.sh" "${package_root}/install-agent.sh" \
+for script in "${package_root}/install-binary.sh" "${package_root}/install-agent.sh" \
 	"${package_root}/uninstall.sh" "${package_root}/uninstall-agent.sh" \
-	"${package_root}/scripts/install-lib.sh" "${package_root}/scripts/healthcheck.sh"
+	"${package_root}/scripts/install-lib.sh"; do
+	bash -n "${script}"
+done
 
 [ -x "${binary}" ] || { echo "Binary is not executable" >&2; exit 1; }
 [ -x "${agent_binary}" ] || { echo "Agent binary is not executable" >&2; exit 1; }
@@ -86,7 +93,7 @@ LC_ALL=C grep -a -q '选择备份 JSON' "${binary}" || { echo "Binary lacks JSON
 LC_ALL=C grep -a -q 'restoreRulesFile' "${binary}" || { echo "Binary lacks direct JSON restore upload" >&2; exit 1; }
 if LC_ALL=C grep -a -q '粘贴组合 JSON' "${binary}"; then echo "Binary still embeds the obsolete paste-based restore UI" >&2; exit 1; fi
 LC_ALL=C grep -a -q 'Docker 映射前的宿主机端口' "${binary}" || { echo "Binary lacks Docker original-port management" >&2; exit 1; }
-LC_ALL=C grep -a -q '管理页面连接到 33801 时' "${binary}" || { echo "Binary lacks Docker client-address guidance" >&2; exit 1; }
+if LC_ALL=C grep -a -q '管理页面连接到 33801 时' "${binary}"; then echo "Binary still embeds the removed Docker client-address banner" >&2; exit 1; fi
 LC_ALL=C grep -a -q 'Docker 规则链路不可用' "${binary}" || { echo "Binary lacks Docker path validation UI" >&2; exit 1; }
 LC_ALL=C grep -a -q 'displayRuleDescription' "${binary}" || { echo "Binary lacks corrected Docker mapping descriptions" >&2; exit 1; }
 LC_ALL=C grep -a -q '搜索容器、端口或来源 IP' "${binary}" || { echo "Binary lacks Docker policy search" >&2; exit 1; }
@@ -119,7 +126,6 @@ grep -q -- '--non-interactive' "${package_root}/install-agent.sh"
 grep -q 'AGENT_IDENTITY_FILE' "${package_root}/install-agent.sh"
 grep -q 'EnvironmentFile=' "${package_root}/install-agent.sh"
 grep -q 'EnvironmentFile=' "${package_root}/install-binary.sh"
-grep -q '/usr/local/bin/healthcheck.sh' "${package_root}/docker-compose.release.yml"
 if grep -q '^Environment=API_KEY=' "${package_root}/install-binary.sh"; then echo "Installer writes plaintext API_KEY" >&2; exit 1; fi
 grep -q '正在恢复安装前状态' "${package_root}/install-binary.sh" || { echo "Controller installer lacks rollback" >&2; exit 1; }
 grep -q '正在恢复安装前状态' "${package_root}/install-agent.sh" || { echo "Agent installer lacks rollback" >&2; exit 1; }

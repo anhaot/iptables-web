@@ -24,14 +24,41 @@ install_validate_absolute_path() {
 			;;
 	esac
 	install_reject_control_chars "${name}" "${value}"
+	local canonical
+	canonical="$(realpath -m -- "${value}")" || return 1
+	if [ "${canonical}" != "${value}" ]; then
+		printf '[ERROR] %s 必须使用规范绝对路径，不能包含 ..、重复斜杠、尾部斜杠或符号链接: %s\n' "${name}" "${value}" >&2
+		return 1
+	fi
 }
 
 install_validate_runtime_path() {
 	local name="$1" value="$2"
 	install_validate_absolute_path "${name}" "${value}" || return 1
 	case "${value}" in
+		/|/etc|/usr|/var|/opt|/usr/local|/var/lib|/etc/systemd|/etc/systemd/system|/home|/root|/srv|/mnt|/media|/run|/var/log|/var/cache)
+			printf '[ERROR] 拒绝过宽的 %s: %s\n' "${name}" "${value}" >&2
+			return 1
+			;;
+		/dev|/dev/*|/proc|/proc/*|/sys|/sys/*|/boot|/boot/*|/run/*)
+			printf '[ERROR] %s 不能使用系统运行目录: %s\n' "${name}" "${value}" >&2
+			return 1
+			;;
 		/tmp|/tmp/*|/var/tmp|/var/tmp/*)
 			printf '[ERROR] %s 不能位于 /tmp 或 /var/tmp；systemd PrivateTmp 会隔离该路径: %s\n' "${name}" "${value}" >&2
+			return 1
+			;;
+	esac
+}
+
+# Directories chmod'ed to 0700 must be application-specific. Binary parent
+# directories such as /usr/local/bin remain valid for BIN_DIR only.
+install_validate_private_dir() {
+	local name="$1" value="$2"
+	install_validate_runtime_path "${name}" "${value}" || return 1
+	case "${value}" in
+		/bin|/sbin|/lib|/lib64|/usr/bin|/usr/sbin|/usr/lib|/usr/lib64|/usr/local/bin|/usr/local/sbin|/usr/local/lib|/usr/share|/usr/local/share|/etc/ssh|/etc/ssl|/etc/security|/etc/pam.d|/var/lib/systemd|/var/lib/docker)
+			printf '[ERROR] %s 必须是程序专用目录: %s\n' "${name}" "${value}" >&2
 			return 1
 			;;
 	esac

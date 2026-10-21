@@ -16,6 +16,17 @@ coverage.*
 /users.json*
 /audit.jsonl*
 /rollback.json*
+hosts.json*
+hosts.key
+api-keys.json*
+security-policy.json*
+monitoring-policy.json*
+agent.identity
+agent.key.sha256
+*.pem
+*.key
+*.p12
+*.pfx
 *.pid
 *.log
 
@@ -23,7 +34,6 @@ coverage.*
 .env
 .env.*
 !.env.example
-docker-compose.override.yml
 
 # Test and browser artifacts
 /.playwright-cli/
@@ -47,3 +57,9 @@ Thumbs.db
 *.tmp
 *.temp
 *.bak
+__pycache__/
+*.pyc
+
+# Local interview notes (never commit or publish)
+/docs/interview-guide.md
+/xmjs.md

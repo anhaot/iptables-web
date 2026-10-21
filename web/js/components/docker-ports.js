@@ -10,7 +10,12 @@ const DockerPorts = {
 	searchQuery: '',
 	policyFilter: 'all',
 	expandedPolicies: new Set(),
+  expandedContainers: new Set(),
 	refreshSerial: 0,
+ selectedRules: new Set(),
+ selectionContext: null,
+ bulkForm: null,
+ mutating: false,
 
   setFamily(family) {
     this.family = family === 'ipv6' ? 'ipv6' : 'ipv4';
@@ -37,6 +42,7 @@ const DockerPorts = {
   },
 
   async refresh() {
+ this.resetSelectionContext();
     const serial = ++this.refreshSerial;
     const context = AppState.captureHostContext();
     this.loading = true;
@@ -45,11 +51,15 @@ const DockerPorts = {
     const results = await Promise.allSettled([api.getDockerMappings(context.hostID), api.getDockerDiagnostics(context.hostID), api.listRules('', 'packet', context.hostID)]);
     if (serial !== this.refreshSerial || !AppState.isHostContextCurrent(context)) return;
     if (results[0].status === 'fulfilled') this.mappings = results[0].value;
-    else this.error = results[0].reason.message;
+    else { this.mappings = []; this.error = results[0].reason.message; }
     this.diagnostics = results[1].status === 'fulfilled' ? results[1].value : null;
 	this.rules = results[2].status === 'fulfilled' ? results[2].value : [];
 	if (results[2].status !== 'fulfilled' && !this.error) this.error = results[2].reason.message;
-    this.loading = false;
+    this.selectedRules = new Set([...this.selectedRules].filter(id => this.rules.some(rule => rule.id === id)));
+    const groupKeys = new Set(this.groups().map(group => group.key));
+    this.expandedContainers = new Set([...this.expandedContainers].filter(key => groupKeys.has(key)));
+    this.expandFilteredContainers();
+ this.loading = false;
     this.render();
   },
 
@@ -59,8 +69,20 @@ const DockerPorts = {
 	  this.render();
 	},
 
+  toggleContainer(key) {
+    if (this.expandedContainers.has(key)) this.expandedContainers.delete(key);
+    else this.expandedContainers.add(key);
+    this.render();
+  },
+
+  expandFilteredContainers() {
+    if (!this.searchQuery.trim() && this.policyFilter === 'all') return;
+    groupDockerPolicies(this.filteredPolicies).forEach(group => this.expandedContainers.add(group.key));
+  },
+
 	setPolicyFilter(value) {
 	  this.policyFilter = value || 'all';
+	  this.expandFilteredContainers();
 	  this.render();
 	},
 
@@ -153,50 +175,183 @@ const DockerPorts = {
 	}, 'packet');
   },
 
-  async createWhitelistFromMapping(mapping) {
-    if (!AppState.canManageRules()) {
-      Toasts.error('需要管理员权限');
-      return;
-    }
-    if (dockerMappingFamily(mapping) === 'ipv6') {
-      Toasts.error('IPv6 映射当前只读；请使用规则助手生成并审核 ip6tables 规则');
-      return;
-    }
-    if (!dockerRulePathUsable(this.diagnostics)) {
-      Toasts.error(this.diagnostics.path.message || 'DOCKER_USER 当前不在有效转发路径中');
-      return;
-    }
-    const detectedSource = String((this.diagnostics || {}).client_ip || '');
-    const promptText = detectedSource
-      ? '管理页面连接到 33801 时，服务器看到的 TCP 对端地址是 ' + detectedSource + '。它不一定是物理网卡地址，也不能证明访问 Docker 端口时来源相同；若 18080 走同一路径可直接使用。'
-      : '允许访问的来源 IPv4/CIDR，例如 1.2.3.4 或 10.0.0.0/8';
-    const source = await Dialogs.prompt({
-      title: '添加 Docker 白名单来源',
-      message: promptText,
-      label: '允许访问的来源 IPv4 / CIDR',
-      defaultValue: detectedSource,
-      placeholder: '例如 1.2.3.4 或 10.0.0.0/8',
-      target: `${AppState.currentHostTarget()} · ${formatHostEndpoint(mapping.host_ip, mapping.host_port)}`,
-      confirmText: '继续配置'
-    });
-    if (!source || !source.trim()) return;
+  setSearch(value) {
+    this.searchQuery = String(value || '');
+    this.expandFilteredContainers();
+    const root = document.getElementById('docker-policy-results');
+    if (root) { root.innerHTML = this.renderPolicyGroups(); this.bindPolicyEvents(root); this.updateSelectionViews(); }
+  },
 
+  resetSelectionContext() {
     const context = AppState.captureHostContext();
+    if (!this.selectionContext || !AppState.isHostContextCurrent(this.selectionContext)) {
+      this.selectedRules = new Set(); this.bulkForm = null;
+      this.mappings = []; this.rules = []; this.diagnostics = null;
+      this.expandedPolicies = new Set(); this.error = null;
+      this.expandedContainers = new Set();
+      this.selectionContext = context;
+    }
+  },
+
+  groups() { return groupDockerPolicies(this.policies); },
+
+  renderPolicyGroups() {
+    const canManage = AppState.canManageRules();
+    const canAdd = canManage && this.family === 'ipv4' && dockerRulePathUsable(this.diagnostics);
+    const groups = groupDockerPolicies(this.filteredPolicies);
+    if (!groups.length) return '<div class="empty-state"><h3>没有匹配的访问策略</h3><p>请调整容器、端口或来源搜索条件。</p></div>';
+    const allGroups = new Map(this.groups().map(group => [group.key,group]));
+    return groups.map((visible, index) => {
+      const group = allGroups.get(visible.key) || visible;
+      const groupRules = uniqueDockerRules(group.policies);
+      const expanded = this.expandedContainers.has(group.key);
+      const bodyID = `docker-container-body-${index}`;
+      return `<section class="docker-container-group" aria-label="${escapeHtml(group.name)}"><div class="docker-container-header"><button type="button" class="docker-container-toggle" data-container-toggle="${escapeHtml(group.key)}" aria-expanded="${expanded}" ${expanded ? `aria-controls="${bodyID}"` : ''} aria-label="${expanded ? '收起' : '展开'}${group.residual ? '策略' : '容器'} ${escapeHtml(group.name)}"><span class="docker-container-chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span><span class="docker-container-summary"><strong>${escapeHtml(group.name)}</strong><small>${group.policies.length} 个发布端口 · ${groupRules.length} 条托管规则${visible.policies.length !== group.policies.length ? ` · 当前显示 ${visible.policies.length} 个端口` : ''}</small></span></button><div class="btn-group">${canAdd && group.mappings.length ? `<button class="btn btn-sm btn-primary" data-container-add="${escapeHtml(group.key)}" ${this.mutating ? 'disabled' : ''}>批量添加来源</button>` : ''}${canManage && this.family === 'ipv4' && groupRules.length ? `<button class="btn btn-sm btn-danger" data-container-clear="${escapeHtml(group.key)}" ${this.mutating ? 'disabled' : ''}>${group.residual ? '清空此残留策略' : '清空此容器规则'}</button>` : ''}</div></div>${expanded ? `<div id="${bodyID}" class="docker-policy-list">${visible.policies.map(policy => renderDockerPolicy(policy, canManage, canAdd, this.expandedPolicies.has(policy.key), this.selectedRules)).join('')}</div>` : ''}</section>`;
+    }).join('');
+  },
+
+  toggleRuleSelection(id, checked) {
+    if (checked) this.selectedRules.add(id); else this.selectedRules.delete(id);
+    this.updateSelectionViews();
+  },
+
+  togglePolicySelection(key, checked) {
+    const policy = this.policies.find(item => item.key === key);
+    if (!policy) return;
+    policy.rules.forEach(rule => { if (checked) this.selectedRules.add(rule.id); else this.selectedRules.delete(rule.id); });
+ this.updateSelectionViews();
+  },
+
+  updateSelectionViews() {
+    const root = document.getElementById('docker-content');
+    if (!root) return;
+ const byKey = new Map(this.policies.map(policy => [policy.key, policy]));
+    root.querySelectorAll('[data-rule-select]').forEach(input => { input.checked = this.selectedRules.has(input.dataset.ruleSelect); });
+    root.querySelectorAll('[data-policy-select]').forEach(input => {
+      const policy = byKey.get(input.dataset.policySelect);
+      const selected = policy ? policy.rules.filter(rule => this.selectedRules.has(rule.id)).length : 0;
+      input.checked = !!policy && policy.rules.length > 0 && selected === policy.rules.length;
+      input.indeterminate = selected > 0 && selected < policy.rules.length;
+    });
+    root.querySelectorAll('[data-delete-selected]').forEach(button => { button.disabled = !this.selectedRules.size || this.mutating; button.textContent = `删除所选（${this.selectedRules.size}）`; });
+  },
+
+  async deleteMany(rules, title, target) {
+    if (!AppState.canManageRules() || this.mutating) return;
+    const unique = Array.from(new Map(rules.map(rule => [rule.id, { ...rule }])).values());
+    if (!unique.length) return Toasts.info('请先选择规则');
+    if (unique.length > 1000) return Toasts.warning('每批最多删除 1000 条，请分批选择');
+    const context = AppState.captureHostContext();
+    const fallbackCount = unique.filter(rule => ['DROP','REJECT'].includes(rule.action) && !rule.source).length;
+    const accepted = await Dialogs.confirm({
+      title, target: `${AppState.currentHostTarget()} · ${target} · ${unique.length} 条规则`,
+      message: `将删除已确认的 ${unique.length} 条托管规则（包含禁用规则）。${fallbackCount ? `其中 ${fallbackCount} 条是兜底拒绝规则，删除后对应端口可能恢复为对所有来源开放。` : '现有兜底拒绝规则会保留；没有允许来源时端口可能完全阻断。'} Docker 自身及其他工具的规则保留。`,
+      detail: unique.map(rule => `${rule.chain} #${rule.position} ${rule.action} · ${rule.source || '任意来源'} · 原始端口 ${rule.original_dport || rule.dport || '任意'}`).join('\n'),
+      confirmText: `确认删除 ${unique.length} 条`, danger: true
+    });
+    if (!accepted) return;
+    if (!AppState.isHostContextCurrent(context)) return Toasts.warning('主机已切换，请重新选择规则');
+    this.mutating = true; this.updateSelectionViews();
     try {
-      const result = await api.createDockerWhitelist({
-        source: source.trim(), protocol: mapping.protocol || 'tcp',
-        host_ip: mapping.host_ip || '', host_port: mapping.host_port,
-        container_name: mapping.container_name || '', container_port: mapping.container_port
-      }, context.hostID);
+      const result = await api.batchDeleteRules(unique, context.hostID);
       AppState.invalidateRuleSummary(context);
       if (!AppState.isHostContextCurrent(context)) return;
-      Toasts[result.created === false ? 'info' : 'success'](result.created === false
-        ? '这个来源已经在该端口的允许列表中'
-        : '白名单已整体应用：允许规则在前，兜底 DROP 在后');
-	  await this.refresh();
-    } catch (e) {
-      Toasts.error('创建白名单失败：' + e.message);
-    }
+      unique.forEach(rule => this.selectedRules.delete(rule.id));
+      Toasts.success(`已删除 ${result.removed} 条规则`);
+      await this.refresh();
+    } catch (error) {
+      if (AppState.isHostContextCurrent(context)) Toasts.error([404, 405].includes(error.status) ? '目标 Agent 不支持批量操作，请先升级 Agent' : '删除失败：' + error.message);
+    } finally { this.mutating = false; if (AppState.isHostContextCurrent(context)) { this.render(); } }
+  },
+
+  deleteSelected() { return this.deleteMany(this.rules.filter(rule => this.selectedRules.has(rule.id)), '删除所选 Docker 规则', '已勾选规则'); },
+
+  clearContainer(key) {
+    const group = this.groups().find(item => item.key === key);
+    if (group) return this.deleteMany(uniqueDockerRules(group.policies), group.residual ? '清空残留策略' : '清空容器托管规则', `${group.name} · ${group.policies.map(policy => `${policy.port}/${policy.protocol}`).join('、')}`);
+  },
+
+  clearPolicy(key) {
+    const policy = this.policies.find(item => item.key === key);
+    if (policy) return this.deleteMany(policy.rules, '清空此发布端口规则', `${formatHostEndpoint(policy.hostIP, policy.port)}/${policy.protocol}`);
+  },
+
+  openBulkSources(mappings) {
+    if (!AppState.canManageRules() || this.mutating || this.loading || !dockerRulePathUsable(this.diagnostics)) return;
+    const unique = Array.from(new Map(mappings.filter(mapping => dockerMappingFamily(mapping) === 'ipv4').map(mapping => [dockerPolicyKey(mapping.protocol, normalizeDockerPolicyHost(mapping.host_ip, 'ipv4'), mapping.host_port), { ...mapping }])).values());
+    if (!unique.length) return;
+    this.bulkForm = { context: AppState.captureHostContext(), mappings: unique, selected: new Set(unique.map((_,index) => index)), sources: '' };
+    this.render();
+    document.getElementById('docker-bulk-sources')?.focus();
+  },
+
+  closeBulkSources() { if (!this.mutating) { this.bulkForm = null; this.render(); } },
+
+  updateBulkSources(value) { if (this.bulkForm) { this.bulkForm.sources = value; this.updateBulkPreview(); } },
+
+  toggleBulkPort(index, checked) {
+    if (!this.bulkForm) return;
+    if (checked) this.bulkForm.selected.add(index); else this.bulkForm.selected.delete(index);
+    this.updateBulkPreview();
+  },
+
+  updateBulkPreview() {
+    const form = this.bulkForm;
+    if (!form) return;
+    const sources = parseDockerSources(form.sources);
+    const combinations = sources.length * form.selected.size;
+    const preview = document.getElementById('docker-bulk-preview');
+    if (preview) preview.textContent = `${sources.length} 个来源 × ${form.selected.size} 个发布端口 = ${combinations} 个组合（每批最多 200 个）`;
+    const submit = document.getElementById('docker-bulk-submit');
+    if (submit) submit.disabled = this.mutating || !combinations || combinations > 200 || sources.length > 100 || form.selected.size > 50;
+  },
+
+  renderBulkSources() {
+    const form = this.bulkForm;
+    if (!form || !AppState.isHostContextCurrent(form.context)) return '';
+    return `<div class="docker-bulk-modal"><div class="modal-overlay" onclick="DockerPorts.closeBulkSources()"></div><section class="modal" role="dialog" aria-modal="true" aria-labelledby="docker-bulk-title"><div class="modal-header"><h2 id="docker-bulk-title">批量添加允许来源</h2><button type="button" class="modal-close" aria-label="关闭批量添加" onclick="DockerPorts.closeBulkSources()">✕</button></div><form onsubmit="DockerPorts.submitBulkSources();return false"><label class="form-label" for="docker-bulk-sources">来源 IPv4 / CIDR</label><textarea id="docker-bulk-sources" class="form-textarea mono" rows="6" maxlength="8192" required placeholder="每行一个，例如：&#10;192.168.1.10&#10;10.20.0.0/16" oninput="DockerPorts.updateBulkSources(this.value)">${escapeHtml(form.sources)}</textarea><p class="monitoring-note">支持换行或逗号分隔，重复来源自动合并；保留已有来源，为每个端口复用或补齐兜底 DROP。</p><fieldset class="docker-bulk-ports"><legend>应用到发布端口</legend>${form.mappings.map((mapping,index) => `<label class="form-check"><input type="checkbox" data-bulk-port="${index}" ${form.selected.has(index) ? 'checked' : ''}>${escapeHtml(mapping.container_name || '容器')} · ${escapeHtml(formatHostEndpoint(mapping.host_ip, mapping.host_port))}/${escapeHtml(mapping.protocol || 'tcp')}</label>`).join('')}</fieldset><p id="docker-bulk-preview" aria-live="polite"></p><div class="btn-group"><button class="btn btn-secondary" type="button" onclick="DockerPorts.closeBulkSources()">取消</button><button id="docker-bulk-submit" class="btn btn-primary" type="submit" disabled>预览并添加</button></div></form></section></div>`;
+  },
+
+  async submitBulkSources() {
+    const form = this.bulkForm;
+    if (!form || this.mutating) return;
+    if (!AppState.isHostContextCurrent(form.context)) return this.closeBulkSources();
+    const sources = parseDockerSources(form.sources);
+    const mappings = form.mappings.filter((_,index) => form.selected.has(index));
+    if (!sources.length || sources.length > 100 || !mappings.length || mappings.length > 50 || sources.length * mappings.length > 200) return Toasts.warning('请选择端口和来源，每批最多 200 个组合');
+    const accepted = await Dialogs.confirm({title: '确认批量添加 Docker 来源', target: AppState.currentHostTarget(), message: `允许 ${sources.length} 个来源访问 ${mappings.length} 个发布端口；已有来源保留，其他来源由兜底 DROP 阻止。`, detail: `来源：\n${sources.join('\n')}\n\n发布端口：\n${mappings.map(mapping => `${mapping.container_name} · ${formatHostEndpoint(mapping.host_ip,mapping.host_port)}/${mapping.protocol}`).join('\n')}`, confirmText: '确认添加'});
+    if (!accepted) return;
+    if (!AppState.isHostContextCurrent(form.context)) return Toasts.warning('主机已切换，请重新配置');
+    this.mutating = true; this.updateBulkPreview();
+    try {
+      const result = await api.createDockerWhitelistBatch(dockerBatchPayload(sources, mappings), form.context.hostID);
+      AppState.invalidateRuleSummary(form.context);
+      if (!AppState.isHostContextCurrent(form.context)) return;
+      this.bulkForm = null;
+      Toasts.success(`新增 ${result.added_sources} 条来源规则、${result.added_fallbacks} 条兜底规则，跳过 ${result.skipped_sources} 个已有来源`);
+      await this.refresh();
+    } catch (error) {
+      if (AppState.isHostContextCurrent(form.context)) Toasts.error([404, 405].includes(error.status) ? '目标 Agent 不支持批量操作，请先升级 Agent' : '添加失败：' + error.message);
+    } finally { this.mutating = false; if (AppState.isHostContextCurrent(form.context)) this.render(); }
+  },
+
+  bindPolicyEvents(root) {
+    root.querySelectorAll('[data-container-toggle]').forEach(button => button.addEventListener('click', () => this.toggleContainer(button.dataset.containerToggle)));
+    root.querySelectorAll('[data-policy-toggle]').forEach(button => button.addEventListener('click', () => this.togglePolicy(button.dataset.policyToggle)));
+    root.querySelectorAll('[data-policy-rules]').forEach(button => button.addEventListener('click', () => { const policy = this.policies.find(item => item.key === button.dataset.policyRules); if (policy) this.showInRules(policy); }));
+    root.querySelectorAll('[data-rule-edit]').forEach(button => button.addEventListener('click', () => this.openRule(button.dataset.ruleEdit)));
+    root.querySelectorAll('[data-rule-toggle]').forEach(button => button.addEventListener('click', () => this.toggleRule(button.dataset.ruleToggle)));
+    root.querySelectorAll('[data-rule-delete]').forEach(button => button.addEventListener('click', () => this.deleteRule(button.dataset.ruleDelete)));
+    root.querySelectorAll('[data-rule-select]').forEach(input => input.addEventListener('change', () => this.toggleRuleSelection(input.dataset.ruleSelect,input.checked)));
+    root.querySelectorAll('[data-policy-select]').forEach(input => input.addEventListener('change', () => this.togglePolicySelection(input.dataset.policySelect,input.checked)));
+    root.querySelectorAll('[data-policy-clear]').forEach(button => button.addEventListener('click', () => this.clearPolicy(button.dataset.policyClear)));
+    root.querySelectorAll('[data-container-clear]').forEach(button => button.addEventListener('click', () => this.clearContainer(button.dataset.containerClear)));
+    root.querySelectorAll('[data-container-add]').forEach(button => button.addEventListener('click', () => { const group = this.groups().find(item => item.key === button.dataset.containerAdd); if (group) this.openBulkSources(group.mappings); }));
+    root.querySelectorAll('[data-bulk-port]').forEach(input => input.addEventListener('change', () => this.toggleBulkPort(Number(input.dataset.bulkPort),input.checked)));
+    root.querySelectorAll('[data-mapping-idx]').forEach(button => button.addEventListener('click', () => {
+      const mapping = this.mappings[Number(button.dataset.mappingIdx)];
+      if (mapping) { if (button.dataset.action === 'whitelist') this.openBulkSources([mapping]); else this.createRuleFromMapping(mapping); }
+    }));
   },
 
   render() {
@@ -219,12 +374,12 @@ const DockerPorts = {
         </span>
       </div>
 
-      ${this.diagnostics && this.diagnostics.client_ip ? `<div class="alert alert-info">管理页面连接到 33801 时，服务器看到的 TCP 对端地址是 <strong>${escapeHtml(this.diagnostics.client_ip)}</strong>。它不是“物理机真实 IP”判定，也不能保证访问 Docker 端口时来源相同；VMware NAT、代理或 VPN 都可能改变它。</div>` : ''}
       ${this.diagnostics && !pathUsable ? `<div class="alert alert-error"><strong>Docker 规则链路不可用：</strong>${escapeHtml(path.message || 'DOCKER_USER 不在当前 Docker 转发路径中')}。为避免产生不会生效的规则，Docker 端口操作已禁用。</div>` : ''}
 
       <div class="toolbar" style="margin-bottom:1rem">
         <button class="btn btn-secondary" onclick="DockerPorts.refresh()">↻ 扫描 Docker 端口</button>
-		<input class="search-input" type="text" placeholder="搜索容器、端口或来源 IP..." value="${escapeHtml(this.searchQuery)}" oninput="DockerPorts.searchQuery=this.value;DockerPorts.render()">
+ ${canManage && this.family === 'ipv4' ? `<button class="btn btn-danger" data-delete-selected onclick="DockerPorts.deleteSelected()" disabled>删除所选（${this.selectedRules.size}）</button>` : ''}
+		<input class="search-input" type="text" placeholder="搜索容器、端口或来源 IP..." value="${escapeHtml(this.searchQuery)}" oninput="DockerPorts.setSearch(this.value)">
 		<select class="form-select docker-policy-filter" onchange="DockerPorts.setPolicyFilter(this.value)" aria-label="访问策略状态">
 		  ${[['all','全部状态'],['protected','白名单保护'],['unprotected','未配置保护'],['blocked','完全阻止'],['risk','存在异常'],['unmanaged','未管理'],['residual','残留策略']].map(([value,label]) => `<option value="${value}" ${this.policyFilter === value ? 'selected' : ''}>${label}</option>`).join('')}
 		</select>
@@ -238,7 +393,7 @@ const DockerPorts = {
 
       ${this.error ? `<div class="alert alert-warning">
         ⚠ 无法检测 Docker 端口映射：${escapeHtml(this.error)}。
-        <br><small>请尝试挂载 Docker socket：<code>-v /var/run/docker.sock:/var/run/docker.sock:ro</code></small>
+        <br><small>请检查目标主机的 Docker 服务及 /var/run/docker.sock 访问权限。</small>
       </div>` : ''}
 
       ${this.loading ? '<div class="loading-spinner"><div class="spinner"></div> 正在扫描 Docker 端口映射...</div>' : ''}
@@ -247,53 +402,40 @@ const DockerPorts = {
         <div class="empty-state">
           <div class="empty-icon">🐳</div>
 		  <h3>${this.searchQuery || this.policyFilter !== 'all' ? '没有匹配的访问策略' : `未检测到 ${this.family.toUpperCase()} Docker 端口映射或残留策略`}</h3>
-		  <p>${this.searchQuery || this.policyFilter !== 'all' ? '请调整搜索词或状态筛选。' : '如果已运行带有端口映射的 Docker 容器，请挂载 Docker socket 以启用自动检测。'}</p>
+		  <p>${this.searchQuery || this.policyFilter !== 'all' ? '请调整搜索词或状态筛选。' : '如果已运行带有端口映射的 Docker 容器，请检查目标主机的 Docker 服务和 socket 访问权限。'}</p>
         </div>
       ` : ''}
 
-      ${!this.loading && visible.length > 0 ? `
-		<div class="docker-policy-list">
-		  ${visible.map(policy => renderDockerPolicy(policy, canManage, this.family === 'ipv4' && pathUsable, this.expandedPolicies.has(policy.key))).join('')}
-        </div>
-      ` : ''}
+      <div id="docker-policy-results">${!this.loading && visible.length > 0 ? this.renderPolicyGroups() : ''}</div>
+ ${this.renderBulkSources()}
     `;
 
-    // Safe event binding - avoids XSS from JSON.stringify in onclick
-	root.querySelectorAll('button[data-policy-toggle]').forEach(btn => {
-	  btn.addEventListener('click', function() {
-		DockerPorts.togglePolicy(this.getAttribute('data-policy-toggle'));
-	  });
-	});
-	root.querySelectorAll('button[data-policy-rules]').forEach(btn => {
-	  btn.addEventListener('click', function() {
-		const policy = DockerPorts.policies.find(item => item.key === this.getAttribute('data-policy-rules'));
-		if (policy) DockerPorts.showInRules(policy);
-	  });
-	});
-	root.querySelectorAll('button[data-rule-edit]').forEach(btn => {
-	  btn.addEventListener('click', function() { DockerPorts.openRule(this.getAttribute('data-rule-edit')); });
-	});
-	root.querySelectorAll('button[data-rule-toggle]').forEach(btn => {
-	  btn.addEventListener('click', function() { DockerPorts.toggleRule(this.getAttribute('data-rule-toggle')); });
-	});
-	root.querySelectorAll('button[data-rule-delete]').forEach(btn => {
-	  btn.addEventListener('click', function() { DockerPorts.deleteRule(this.getAttribute('data-rule-delete')); });
-	});
-	root.querySelectorAll('button[data-mapping-idx]').forEach(btn => {
-      btn.addEventListener('click', function() {
-        const idx = parseInt(this.getAttribute('data-mapping-idx'));
-        const action = this.getAttribute('data-action');
-        if (DockerPorts.mappings[idx]) {
-          if (action === 'whitelist') {
-            DockerPorts.createWhitelistFromMapping(DockerPorts.mappings[idx]);
-          } else {
-            DockerPorts.createRuleFromMapping(DockerPorts.mappings[idx]);
-          }
-        }
-      });
-    });
+    this.bindPolicyEvents(root);
+    this.updateSelectionViews();
+    this.updateBulkPreview();
   }
 };
+
+function dockerBatchPayload(sources, mappings) {
+ return { sources, mappings: mappings.map(mapping => ({ protocol: mapping.protocol || 'tcp', host_ip: mapping.host_ip || '', host_port: Number(mapping.host_port), container_name: mapping.container_name || '', container_port: Number(mapping.container_port) })) };
+}
+
+function parseDockerSources(value) {
+ return Array.from(new Set(String(value || '').split(/[\s,;，；]+/).map(item => item.trim()).filter(Boolean)));
+}
+
+function groupDockerPolicies(policies) {
+ const groups = new Map();
+ (policies || []).forEach(policy => {
+  const mapping = policy.mapping;
+  const key = mapping ? 'container:' + (mapping.container_id || mapping.container_name || policy.key) : 'residual:' + policy.key;
+  if (!groups.has(key)) groups.set(key, { key, name: mapping ? mapping.container_name || 'Docker 容器' : '残留访问策略', residual: !mapping, policies: [], mappings: [] });
+  const group = groups.get(key); group.policies.push(policy); if (mapping) group.mappings.push(mapping);
+ });
+ return [...groups.values()];
+}
+
+function uniqueDockerRules(policies) { return [...new Map(policies.flatMap(policy => policy.rules).map(rule => [rule.id, rule])).values()]; }
 
 function buildDockerPolicies(mappings, rules, family) {
 	const policies = [];
@@ -411,9 +553,8 @@ function formatPolicyPositions(positions) {
 	return unique.map(value => `#${value}`).join('、');
 }
 
-function renderDockerPolicy(policy, canManage, canMutateMapping, expanded) {
+function renderDockerPolicy(policy, canManage, canMutateMapping, expanded, selected) {
 	const mapping = policy.mapping || {};
-	const name = mapping.container_name || '残留访问策略';
 	const endpoint = policy.mapping
 	  ? `${formatHostEndpoint(mapping.host_ip, mapping.host_port)} → ${mapping.container_name || 'Docker 容器'}:${mapping.container_port}/${policy.protocol}`
 	  : `${formatHostEndpoint(policy.hostIP, policy.port)}/${policy.protocol}`;
@@ -425,43 +566,43 @@ function renderDockerPolicy(policy, canManage, canMutateMapping, expanded) {
 		<div class="docker-policy-summary">
 		  <button class="docker-policy-expand" data-policy-toggle="${escapeHtml(policy.key)}" aria-expanded="${expanded}" title="${expanded ? '收起访问策略' : '展开访问策略'}">${expanded ? '▾' : '▸'}</button>
 		  <div class="docker-policy-service">
-			<div class="docker-policy-title-row"><strong>${escapeHtml(name)}</strong><span class="docker-policy-status ${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></div>
 			<div class="docker-policy-endpoint">${escapeHtml(endpoint)}</div>
 			<div class="docker-policy-detail">${escapeHtml(status.detail + disabledText + positionText)}</div>
 		  </div>
 		  <button class="btn btn-sm btn-secondary" data-policy-toggle="${escapeHtml(policy.key)}">${expanded ? '收起' : '查看来源'}</button>
 		</div>
-		${expanded ? renderDockerPolicyDetails(policy, canManage, canMutateMapping) : ''}
+		${expanded ? renderDockerPolicyDetails(policy, canManage, canMutateMapping, selected) : ''}
 	  </section>`;
 }
 
-function renderDockerPolicyDetails(policy, canManage, canMutateMapping) {
+function renderDockerPolicyDetails(policy, canManage, canMutateMapping, selected) {
 	const warning = policy.orderRisk
 	  ? `<div class="alert alert-error"><strong>顺序风险：</strong>${escapeHtml(policy.orderRisk)}</div>`
 	  : policy.residual
 		? '<div class="alert alert-warning">Docker 已找不到对应端口映射；这些规则仍可能留在 DOCKER_USER/FORWARD 中。</div>'
 		: '';
 	const rows = policy.rules.length
-	  ? policy.rules.map(rule => renderDockerPolicyRule(rule, canManage)).join('')
+	  ? policy.rules.map(rule => renderDockerPolicyRule(rule, canManage, selected)).join('')
 	  : '<div class="docker-policy-empty">当前端口没有本程序托管的访问规则。</div>';
 	return `<div class="docker-policy-details">
 	  ${warning}
-	  <div class="docker-policy-rules-header"><span>允许来源与兜底规则</span><span>${policy.rules.length} 条规则</span></div>
+	  <div class="docker-policy-rules-header"><span>${canManage && policy.rules.length ? `<label class="form-check"><input type="checkbox" data-policy-select="${escapeHtml(policy.key)}" aria-label="全选此端口规则">全选此端口规则</label>` : '允许来源与兜底规则'}</span><span>${policy.rules.length} 条规则</span></div>
 	  <div class="docker-policy-rules">${rows}</div>
 	  <div class="docker-policy-actions">
 		${canManage && canMutateMapping && policy.mapping ? `<button class="btn btn-sm btn-primary" data-mapping-idx="${policy.mappingIndex}" data-action="whitelist">+ 添加允许来源</button><button class="btn btn-sm btn-secondary" data-mapping-idx="${policy.mappingIndex}" data-action="drop">添加阻止规则</button>` : ''}
-		${policy.rules.length ? `<button class="btn btn-sm btn-secondary" data-policy-rules="${escapeHtml(policy.key)}">在执行顺序中查看</button>` : ''}
+		${canManage && policy.rules.length ? `<button class="btn btn-sm btn-danger" data-policy-clear="${escapeHtml(policy.key)}">清空此端口规则</button>` : ''}
+ ${policy.rules.length ? `<button class="btn btn-sm btn-secondary" data-policy-rules="${escapeHtml(policy.key)}">在执行顺序中查看</button>` : ''}
 	  </div>
 	</div>`;
 }
 
-function renderDockerPolicyRule(rule, canManage) {
+function renderDockerPolicyRule(rule, canManage, selected) {
 	const action = String(rule.action || '').toUpperCase();
 	let source = rule.source || '任意来源';
 	if (['DROP','REJECT'].includes(action) && !rule.source) source = '其他所有来源';
 	const state = rule.enabled ? '<span class="docker-rule-state enabled">已启用</span>' : '<span class="docker-rule-state disabled">已禁用</span>';
 	return `<div class="docker-policy-rule ${rule.enabled ? '' : 'disabled'}">
-	  <div class="docker-policy-rule-source"><strong>${escapeHtml(source)}</strong><span>${escapeHtml(rule.desc || '—')}</span></div>
+	  <div class="docker-policy-rule-source">${canManage ? `<label class="docker-rule-selection"><input type="checkbox" data-rule-select="${escapeHtml(rule.id)}" aria-label="选择 ${escapeHtml(rule.action)} ${escapeHtml(source)}" ${selected && selected.has(rule.id) ? 'checked' : ''}><strong>${escapeHtml(source)}</strong></label>` : `<strong>${escapeHtml(source)}</strong>`}<span>${escapeHtml(rule.desc || '—')}</span></div>
 	  <div class="docker-policy-rule-meta"><span>${escapeHtml(rule.chain)} #${escapeHtml(rule.position)}</span>${actionBadge(action)}${state}</div>
 	  ${canManage ? `<div class="btn-group docker-policy-rule-actions"><button class="btn btn-xs btn-secondary" data-rule-toggle="${escapeHtml(rule.id)}">${rule.enabled ? '禁用' : '启用'}</button><button class="btn btn-xs btn-secondary" data-rule-edit="${escapeHtml(rule.id)}">编辑</button><button class="btn btn-xs btn-danger" data-rule-delete="${escapeHtml(rule.id)}">删除</button></div>` : ''}
 	</div>`;
@@ -499,7 +640,7 @@ function dockerMappingDescription(mapping) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-	sameRulePort, formatHostEndpoint, dockerMappingFamily, dockerRulePathUsable, dockerMappingDescription,
+	DockerPorts, dockerBatchPayload, parseDockerSources, groupDockerPolicies, uniqueDockerRules, sameRulePort, formatHostEndpoint, dockerMappingFamily, dockerRulePathUsable, dockerMappingDescription,
 	buildDockerPolicies, dockerPolicyKey, normalizeDockerPolicyHost, classifyDockerPolicy, formatPolicyPositions,
   };
 }

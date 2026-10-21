@@ -12,20 +12,26 @@ import (
 
 // iptablesBackend uses the iptables command (legacy or nft variant).
 type iptablesBackend struct {
-	bin     string // "iptables"
-	saveBin string // "iptables-save"
-	restBin string // "iptables-restore"
+	bin         string
+	saveBin     string
+	restBin     string
+	ipv6SaveBin string
+	ipv6RestBin string
 }
 
 func newIptablesBackend() *iptablesBackend {
+	return newIptablesBackendFor("iptables")
+}
+
+func newIptablesBackendFor(name string) *iptablesBackend {
+	ipv6 := strings.Replace(name, "iptables", "ip6tables", 1)
 	return &iptablesBackend{
-		bin:     "iptables",
-		saveBin: "iptables-save",
-		restBin: "iptables-restore",
+		bin: name, saveBin: name + "-save", restBin: name + "-restore",
+		ipv6SaveBin: ipv6 + "-save", ipv6RestBin: ipv6 + "-restore",
 	}
 }
 
-func (b *iptablesBackend) Name() string { return "iptables" }
+func (b *iptablesBackend) Name() string { return b.bin }
 
 func (b *iptablesBackend) DockerPathStatus() DockerPathStatus {
 	status := DockerPathStatus{Backend: b.Name()}
@@ -64,6 +70,9 @@ func (b *iptablesBackend) probe() error {
 }
 
 func (b *iptablesBackend) AddRule(rule *model.Rule) error {
+	if rule.ID == "" {
+		return fmt.Errorf("refusing to add a rule without an ownership ID")
+	}
 	spec := buildIptablesSpec(rule)
 	chain := iptablesChain(rule.Chain)
 	if rule.Position > 0 {
@@ -74,23 +83,16 @@ func (b *iptablesBackend) AddRule(rule *model.Rule) error {
 }
 
 func (b *iptablesBackend) DeleteRule(rule *model.Rule) error {
-	owned := buildIptablesSpec(rule)
-	exists, err := b.ruleSpecExists(rule.Chain, owned)
-	if err != nil {
-		return err
+	if rule.ID == "" {
+		return fmt.Errorf("refusing to delete a rule without an ownership ID")
 	}
-	if exists {
-		return b.run(append([]string{"-t", "filter", "-D", iptablesChain(rule.Chain)}, owned...)...)
-	}
-	return nil
-}
-
-func (b *iptablesBackend) DeleteLegacyRule(rule *model.Rule) error {
-	legacySpecs := [][]string{buildIptablesSpecWithoutOwner(rule, true)}
+	ownedSpecs := [][]string{buildIptablesSpec(rule)}
 	if rule.OriginalDPort != "" {
-		legacySpecs = appendUniqueSpec(legacySpecs, buildIptablesSpecWithoutOwner(rule, false))
+		// Older Docker rules omitted --ctdir. Their ownership comment is still
+		// mandatory; an untagged lookalike is never a migration candidate.
+		ownedSpecs = append(ownedSpecs, buildIptablesSpecWithDirection(rule, false))
 	}
-	for _, spec := range legacySpecs {
+	for _, spec := range ownedSpecs {
 		exists, err := b.ruleSpecExists(rule.Chain, spec)
 		if err != nil {
 			return err
@@ -143,18 +145,18 @@ func (b *iptablesBackend) FlushChain(chain string) error {
 func (b *iptablesBackend) Backup() (string, error) {
 	out, err := commandOutput(b.saveBin)
 	if err != nil {
-		return "", fmt.Errorf("iptables-save: %w", err)
+		return "", fmt.Errorf("%s: %w", b.saveBin, err)
 	}
 	return string(out), nil
 }
 
 func (b *iptablesBackend) BackupIPv6() (string, error) {
-	if _, err := exec.LookPath("ip6tables-save"); err != nil {
-		return "", fmt.Errorf("ip6tables-save not found")
+	if _, err := exec.LookPath(b.ipv6SaveBin); err != nil {
+		return "", fmt.Errorf("%s not found", b.ipv6SaveBin)
 	}
-	out, err := commandOutput("ip6tables-save")
+	out, err := commandOutput(b.ipv6SaveBin)
 	if err != nil {
-		return "", fmt.Errorf("ip6tables-save: %w", err)
+		return "", fmt.Errorf("%s: %w", b.ipv6SaveBin, err)
 	}
 	return string(out), nil
 }
@@ -162,7 +164,7 @@ func (b *iptablesBackend) BackupIPv6() (string, error) {
 func (b *iptablesBackend) ValidateRestore(saveData string) error {
 	out, err := commandCombinedOutput(saveData, b.restBin, "--test", "--wait", "5")
 	if err != nil {
-		return fmt.Errorf("iptables-restore --test: %w\n%s", err, string(out))
+		return fmt.Errorf("%s --test: %w\n%s", b.restBin, err, string(out))
 	}
 	return nil
 }
@@ -170,29 +172,29 @@ func (b *iptablesBackend) ValidateRestore(saveData string) error {
 func (b *iptablesBackend) Restore(saveData string) error {
 	out, err := commandCombinedOutput(saveData, b.restBin, "--wait", "5")
 	if err != nil {
-		return fmt.Errorf("iptables-restore: %w\n%s", err, string(out))
+		return fmt.Errorf("%s: %w\n%s", b.restBin, err, string(out))
 	}
 	return nil
 }
 
 func (b *iptablesBackend) ValidateRestoreIPv6(saveData string) error {
-	if _, err := exec.LookPath("ip6tables-restore"); err != nil {
-		return fmt.Errorf("ip6tables-restore not found")
+	if _, err := exec.LookPath(b.ipv6RestBin); err != nil {
+		return fmt.Errorf("%s not found", b.ipv6RestBin)
 	}
-	out, err := commandCombinedOutput(saveData, "ip6tables-restore", "--test", "--wait", "5")
+	out, err := commandCombinedOutput(saveData, b.ipv6RestBin, "--test", "--wait", "5")
 	if err != nil {
-		return fmt.Errorf("ip6tables-restore --test: %w\n%s", err, string(out))
+		return fmt.Errorf("%s --test: %w\n%s", b.ipv6RestBin, err, string(out))
 	}
 	return nil
 }
 
 func (b *iptablesBackend) RestoreIPv6(saveData string) error {
-	if _, err := exec.LookPath("ip6tables-restore"); err != nil {
-		return fmt.Errorf("ip6tables-restore not found")
+	if _, err := exec.LookPath(b.ipv6RestBin); err != nil {
+		return fmt.Errorf("%s not found", b.ipv6RestBin)
 	}
-	out, err := commandCombinedOutput(saveData, "ip6tables-restore", "--wait", "5")
+	out, err := commandCombinedOutput(saveData, b.ipv6RestBin, "--wait", "5")
 	if err != nil {
-		return fmt.Errorf("ip6tables-restore: %w\n%s", err, string(out))
+		return fmt.Errorf("%s: %w\n%s", b.ipv6RestBin, err, string(out))
 	}
 	return nil
 }
@@ -225,7 +227,7 @@ func (b *iptablesBackend) run(args ...string) error {
 	cmd := exec.CommandContext(ctx, b.bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("iptables %s: %w\n%s", strings.Join(args, " "), err, string(out))
+		return fmt.Errorf("%s %s: %w\n%s", b.bin, strings.Join(args, " "), err, string(out))
 	}
 	return nil
 }
@@ -261,14 +263,6 @@ func buildIptablesSpec(rule *model.Rule) []string {
 }
 
 func buildIptablesSpecWithDirection(rule *model.Rule, includeOriginalDirection bool) []string {
-	return buildIptablesSpecOptions(rule, includeOriginalDirection, true)
-}
-
-func buildIptablesSpecWithoutOwner(rule *model.Rule, includeOriginalDirection bool) []string {
-	return buildIptablesSpecOptions(rule, includeOriginalDirection, false)
-}
-
-func buildIptablesSpecOptions(rule *model.Rule, includeOriginalDirection, includeOwner bool) []string {
 	var spec []string
 	if rule.InIface != "" {
 		spec = append(spec, "-i", rule.InIface)
@@ -306,19 +300,9 @@ func buildIptablesSpecOptions(rule *model.Rule, includeOriginalDirection, includ
 	if rule.State != "" {
 		spec = append(spec, "-m", "conntrack", "--ctstate", rule.State)
 	}
-	if includeOwner && rule.ID != "" {
+	if rule.ID != "" {
 		spec = append(spec, "-m", "comment", "--comment", "iptables-web:"+rule.ID)
 	}
 	spec = append(spec, "-j", rule.Action)
 	return spec
-}
-
-func appendUniqueSpec(specs [][]string, candidate []string) [][]string {
-	wanted := strings.Join(candidate, "\x00")
-	for _, spec := range specs {
-		if strings.Join(spec, "\x00") == wanted {
-			return specs
-		}
-	}
-	return append(specs, candidate)
 }

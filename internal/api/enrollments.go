@@ -149,7 +149,7 @@ func (h *EnrollmentHandler) register(w http.ResponseWriter, r *http.Request) {
 					respondError(w, http.StatusBadGateway, "agent_probe_failed", err.Error())
 					return
 				}
-				if err := h.hosts.Update(existing, req.AgentKey); err != nil {
+				if err := h.hosts.UpdateAgentConnection(existing, existing.BaseURL, existing.CAPEM, req.AgentKey); err != nil {
 					respondError(w, http.StatusInternalServerError, "host_store_error", err.Error())
 					return
 				}
@@ -283,6 +283,7 @@ func (h *EnrollmentHandler) approve(w http.ResponseWriter, r *http.Request) {
 	}
 	ids := req.IDs
 	h.mu.Lock()
+	h.cleanupLocked(time.Now())
 	selected := make([]*pendingEnrollment, len(ids))
 	for i, id := range ids {
 		if item := h.pending[id]; item != nil {
@@ -329,12 +330,14 @@ func (h *EnrollmentHandler) approveOne(ctx context.Context, pending *pendingEnro
 	}
 	seenAt := time.Now().UTC()
 	candidate.AgentLastSeenAt = &seenAt
+	var expectedHost *model.ManagedHost
 	if pending.ExistingHostID != "" {
 		existing, err := h.hosts.Get(pending.ExistingHostID)
 		if err != nil {
 			result.Error = err.Error()
 			return result
 		}
+		expectedHost = existing
 		candidate.ID = existing.ID
 		candidate.Name = existing.Name
 		candidate.Group = existing.Group
@@ -350,8 +353,21 @@ func (h *EnrollmentHandler) approveOne(ctx context.Context, pending *pendingEnro
 		result.Error = err.Error()
 		return result
 	}
+	// The network probe runs without the queue lock. Recheck the reviewed
+	// application before committing so a rejection, expiry or address/key
+	// change during the probe cannot be silently approved.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cleanupLocked(time.Now())
+	current := h.pending[pending.ID]
+	if current == nil || current.BaseURL != pending.BaseURL || current.AgentKey != pending.AgentKey ||
+		current.PublicKey != pending.PublicKey || current.SourceIP != pending.SourceIP ||
+		current.ExistingHostID != pending.ExistingHostID || current.Name != pending.Name || current.Group != pending.Group {
+		result.Error = "pending Agent expired, was rejected, or changed during verification; review the current application"
+		return result
+	}
 	if pending.ExistingHostID != "" {
-		if err := h.hosts.Update(candidate, pending.AgentKey); err != nil {
+		if err := h.hosts.UpdateAgentConnection(expectedHost, candidate.BaseURL, candidate.CAPEM, pending.AgentKey); err != nil {
 			result.Error = err.Error()
 			return result
 		}
@@ -368,10 +384,8 @@ func (h *EnrollmentHandler) approveOne(ctx context.Context, pending *pendingEnro
 	result.Success = true
 	result.Host = &response
 	_ = h.hosts.MarkAgentSeen(pending.ID, seenAt)
-	h.mu.Lock()
 	delete(h.pending, pending.ID)
 	delete(h.rejected, pending.ID)
-	h.mu.Unlock()
 	return result
 }
 

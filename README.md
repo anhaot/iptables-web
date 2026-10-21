@@ -34,7 +34,7 @@ iptables-web 将分散在多台 Linux 主机上的 packet 防火墙与 Docker �
 | 能力 | 说明 |
 | --- | --- |
 | 规则管理 | 新增、编辑、启停、删除和同链排序，保存前预览变化 |
-| Docker 访问控制 | 发现真实发布端口，为 IPv4 映射配置允许来源和兜底阻止 |
+| Docker 访问控制 | 按容器/发布端口维护 IPv4 来源策略，批量新增、勾选删除及局部清空 |
 | Agent 纳管 | 目标机只安装轻量二进制，中心统一命名、检测、打开配置和独立批量下发 |
 | 风险控制 | 校验规则范围、白名单顺序和 Docker 端口匹配，写入后核验 |
 | 用户认证 | 混合字符验证码、密码复杂度/有效期、失败登录锁定、管理员安全重置，以及按主机或主机组授权 |
@@ -54,6 +54,8 @@ iptables-web 将分散在多台 Linux 主机上的 packet 防火墙与 Docker �
 ### 适用范围
 
 当前托管写入范围是 IPv4 packet 规则以及 Docker IPv4 发布端口策略。IPv6 规则和原生 nftables/firewalld 可由规则助手生成或解释，但不会由页面直接写入。项目适合可信内网或已有 VPN/零信任接入的管理面；跨不可信网络必须逐台配置 HTTPS。完整边界见[架构与实现](docs/architecture.md)和[部署与配置](docs/deployment.md)。
+
+纳管概览可搜索主机名称、IP、分组和 Agent ID；管理员可在“用户与权限”设置默认在线检测间隔与离线阈值，并在单台主机配置中覆盖。详见[多主机手册](docs/multi-host.md#在线检测设置)。
 
 ## 工作原理
 
@@ -95,6 +97,16 @@ Linux packet filter
   </tr>
   <tr>
     <td width="50%" align="center">
+      <a href="docs/images/fleet-overview.png"><img src="docs/images/fleet-overview.png" alt="纳管概览"></a><br>
+      <sub>纳管概览：搜索已授权主机、心跳与回连状态</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/agent-management.png"><img src="docs/images/agent-management.png" alt="Agent 纳管"></a><br>
+      <sub>Agent 纳管：签名申请、审批和逐台连接设置</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
       <a href="docs/images/dashboard.png"><img src="docs/images/dashboard.png" alt="iptables-web 仪表盘"></a><br>
       <sub>仪表盘：系统、规则和 Docker 端口概览</sub>
     </td>
@@ -126,22 +138,23 @@ Linux packet filter
   <tr>
     <td width="50%" align="center">
       <a href="docs/images/system-management.png"><img src="docs/images/system-management.png" alt="系统管理、备份、审计和回滚"></a><br>
-      <sub>系统管理：用户、备份、恢复、审计和限时回滚</sub>
+      <sub>系统管理：主机备份、恢复、审计和限时回滚</sub>
     </td>
-    <td width="50%" valign="middle">
-      <strong>截图说明</strong><br><br>
-      截图来自 <code>DEV_MODE=true</code> 的本地演示环境。开发后端不会修改主机防火墙；页面流程、API 校验、数据持久化和审计逻辑与正常模式一致。
+    <td width="50%" align="center">
+      <a href="docs/images/user-permissions.png"><img src="docs/images/user-permissions.png" alt="用户与权限"></a><br>
+      <sub>用户与权限：安全策略、检测设置与主机授权</sub>
     </td>
   </tr>
 </table>
 
+截图来自 `DEV_MODE=true` 的隔离演示环境，使用回环地址和演示数据，Docker 映射采用演示响应；开发后端不会修改主机防火墙。
 
 ## 安装部署
 
 ### 环境要求
 
 - Linux；
-- root 权限，或等效的 `NET_ADMIN`、`NET_RAW` 能力；
+- root 权限，中心与 Agent 均以 systemd 服务部署；
 - iptables、iptables-nft 或 iptables-legacy；
 - 管理 Docker 发布端口时，需要 Docker socket 或 Docker CLI。
 
@@ -195,7 +208,7 @@ sudo MANAGER_URL=http://中心端IP:33801 bash install-agent.sh
 sudo bash install-agent.sh
 ```
 
-Agent 启动后会主动提交签名纳管申请。回到中心的“Agent 纳管”页面单台或批量确认即可，不需要手工填写目标机地址或复制密钥。`MANAGER_URL` 应使用中心内网直连 IP；中心按申请来源 IP 回连 Agent。审批时中心会访问 Agent 的受保护接口验证凭据，HTTPS 私有 CA 可在待确认行提供，证书必须包含该内网 IP 的 SAN。成功后才加入主机清单。可用 `AGENT_NAME` 和 `AGENT_GROUP` 指定初始名称与分组。批准后 Agent 每 15 秒签名上报心跳，页面也每 15 秒刷新心跳视图；受保护回连探测按主机限频为每分钟至多一次。超过 45 秒未上报会标记离线，Agent 正常上报但中心无法回连时会单独标记“回连异常”。
+Agent 启动后会主动提交签名纳管申请。回到中心的“Agent 纳管”页面单台或批量确认即可，不需要手工填写目标机地址或复制密钥。`MANAGER_URL` 应使用中心内网直连 IP；中心按申请来源 IP 回连 Agent。审批时中心会访问 Agent 的受保护接口验证凭据，HTTPS 私有 CA 可在待确认行提供，证书必须包含该内网 IP 的 SAN。成功后才加入主机清单。可用 `AGENT_NAME` 和 `AGENT_GROUP` 指定初始名称与分组。批准后 Agent 每 15 秒签名上报心跳，页面也每 15 秒刷新心跳视图；受保护回连检测默认每台 60 秒，心跳离线阈值默认 45 秒，两者均可由管理员全局设置或逐主机覆盖，动态生效；自动检测仅在相关页面打开时触发。超过生效的心跳阈值未上报会标记离线，Agent 正常上报但中心无法回连时会单独标记“回连异常”。
 
 中心本机也算一台内置纳管主机：管理员可从“纳管概览”的本机行或侧栏“本机防火墙”进入；普通用户只有被明确授予“本机防火墙”后才能看到并管理。纳管概览按主机逐行展示名称、分组、地址和在线状态，默认收起，展开后再读取规则摘要。
 
@@ -204,16 +217,6 @@ Agent 启动后会主动提交签名纳管申请。回到中心的“Agent 纳�
 远程主机的变更审计会在 Agent Key 验证后显示中心已认证的实际用户名、角色和原始来源 IP，并可展开查看请求路径、请求 ID 及脱敏的前后差异；浏览器 Token 不会发送给 Agent。历史记录或尚未升级的 Agent 仍可能显示为 `api-key`。
 
 安装器不会开放端口；请只允许中心端 IP 访问目标机 `33802`。Agent 磁盘只保存密钥 SHA-256 和权限为 `0600` 的签名身份，中心加密保存管理凭据。详细安全边界和卸载选项见[Agent 纳管与按主机授权](docs/multi-host.md)。
-
-### Docker Compose
-
-```bash
-git clone https://github.com/anhaot/iptables-web.git
-cd iptables-web
-docker compose up -d --build
-```
-
-Compose 使用 host network，并授予容器 `NET_ADMIN`、`NET_RAW`，默认限制为 1 CPU、512 MiB 内存。发布包目标机不含完整源码，应使用 `docker-compose.release.yml`。如需自动发现 Docker 发布端口，请在 Compose 中启用已预留的只读 Docker socket 挂载。手动 systemd、脚本、发布包容器、升级和回滚的完整命令见[部署与配置](docs/deployment.md)。
 
 ### 检查服务
 
@@ -278,7 +281,8 @@ go test ./...
 go test -race ./...
 go vet ./...
 node scripts/ui-logic-test.js
-bash -n scripts/*.sh
+for script in scripts/*.sh; do bash -n "$script" || exit; done
+python3 scripts/check-source.py
 ```
 
 本地开发、前端同步、发布包和提交要求见[贡献指南](CONTRIBUTING.md)。
@@ -292,6 +296,7 @@ bash -n scripts/*.sh
 - [API 文档](docs/api.md)
 - [更新计划](docs/roadmap.md)
 - [贡献指南](CONTRIBUTING.md)
+- [开源范围与验证](docs/open-source.md)
 
 ## 许可证
 

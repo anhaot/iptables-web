@@ -130,6 +130,8 @@ pre {
   padding: 0.8rem 1rem;
 }
 
+.host-context-settings { margin-left: auto; flex-shrink: 0; }
+
 .host-detail-tabs {
   display: flex;
   gap: 0.25rem;

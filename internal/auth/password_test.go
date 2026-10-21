@@ -37,3 +37,18 @@ func TestVerifyPasswordSupportsLegacySHA256(t *testing.T) {
 		t.Fatal("NeedsRehash() did not flag legacy hash")
 	}
 }
+
+func TestVerifyPasswordRejectsMalformedPBKDF2(t *testing.T) {
+	// An empty derived key used to produce two zero-length slices, making
+	// ConstantTimeCompare succeed for every password.
+	for _, encoded := range []string{
+		"$pbkdf2-sha256$210000$$",
+		"$pbkdf2-sha256$210000$c2FsdA$",
+		"$pbkdf2-sha256$210000$c2FsdA$aGFzaA",
+		"$pbkdf2-sha256$1$" + strings.Repeat("A", 43) + "$",
+	} {
+		if VerifyPassword("any-password", encoded) {
+			t.Fatalf("malformed hash accepted: %q", encoded)
+		}
+	}
+}

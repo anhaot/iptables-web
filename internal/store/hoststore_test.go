@@ -142,3 +142,103 @@ func mustJSON(t *testing.T, value interface{}) []byte {
 	}
 	return data
 }
+
+func TestAgentConnectionUpdatePreservesConcurrentMetadataAndChecksEndpoint(t *testing.T) {
+	s := NewHostStore(filepath.Join(t.TempDir(), "hosts.json"), "controller-test-key-at-least-32-characters")
+	host := &model.ManagedHost{ID: "host", Name: "old", Group: "old", AgentID: "agent", AgentPublicKey: "public", BaseURL: "http://192.0.2.1:33802", Enabled: true}
+	if err := s.Create(host, "old-key"); err != nil {
+		t.Fatal(err)
+	}
+	probeSnapshot, _ := s.Get(host.ID)
+	adminEdit, _ := s.Get(host.ID)
+	adminEdit.Name, adminEdit.Group, adminEdit.Enabled = "new-name", "new-group", false
+	if err := s.Update(adminEdit, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAgentConnection(probeSnapshot, probeSnapshot.BaseURL, probeSnapshot.CAPEM, "new-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAgentConnection(probeSnapshot, probeSnapshot.BaseURL, probeSnapshot.CAPEM, "stale-key"); err == nil {
+		t.Fatal("a stale concurrent credential verification was accepted")
+	}
+	updated, key, err := s.GetWithAPIKey(host.ID)
+	if err != nil || updated.Name != "new-name" || updated.Group != "new-group" || updated.Enabled || key != "new-key" {
+		t.Fatalf("stale probe overwrote metadata: %#v, %v", updated, err)
+	}
+	changedEndpoint := *updated
+	changedEndpoint.BaseURL = "http://192.0.2.2:33802"
+	if err := s.Update(&changedEndpoint, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAgentConnection(updated, updated.BaseURL, updated.CAPEM, "wrong-key"); err == nil {
+		t.Fatal("stale endpoint accepted")
+	}
+	_, key, _ = s.GetWithAPIKey(host.ID)
+	if key != "new-key" {
+		t.Fatal("stale verification replaced the credential")
+	}
+}
+
+func TestAgentHeartbeatNeverMovesBackwards(t *testing.T) {
+	s := NewHostStore(filepath.Join(t.TempDir(), "hosts.json"), "controller-test-key-at-least-32-characters")
+	host := &model.ManagedHost{ID: "host", Name: "node", AgentID: "agent", BaseURL: "http://192.0.2.1:33802"}
+	if err := s.Create(host, "key"); err != nil {
+		t.Fatal(err)
+	}
+	latest := time.Now().UTC()
+	if err := s.MarkAgentSeen(host.AgentID, latest); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkAgentSeen(host.AgentID, latest.Add(-30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(host.ID)
+	if got.AgentLastSeenAt == nil || !got.AgentLastSeenAt.Equal(latest) {
+		t.Fatalf("heartbeat moved backwards: %v", got.AgentLastSeenAt)
+	}
+}
+
+func TestHostMetadataUpdateCannotRevertAgentConnectionOrHeartbeat(t *testing.T) {
+	s := NewHostStore(filepath.Join(t.TempDir(), "hosts.json"), "controller-test-key-at-least-32-characters")
+	host := &model.ManagedHost{ID: "host", Name: "node", AgentID: "agent", AgentPublicKey: "public", BaseURL: "http://192.0.2.1:33802", Enabled: true}
+	if err := s.Create(host, "old-key"); err != nil {
+		t.Fatal(err)
+	}
+	oldSeen := time.Now().Add(-time.Minute).UTC()
+	if err := s.MarkAgentSeen(host.AgentID, oldSeen); err != nil {
+		t.Fatal(err)
+	}
+	expected, _ := s.Get(host.ID)
+	edit := cloneHost(expected)
+	edit.Name = "renamed"
+	latest := time.Now().UTC()
+	if err := s.MarkAgentSeen(host.AgentID, latest); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMetadata(expected, edit); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(host.ID)
+	if got.Name != "renamed" || got.AgentLastSeenAt == nil || !got.AgentLastSeenAt.Equal(latest) {
+		t.Fatal("metadata edit reverted the heartbeat")
+	}
+	if err := s.UpdateAgentConnection(got, "http://192.0.2.2:33802", "", "rotated-key"); err != nil {
+		t.Fatal(err)
+	}
+	edit.Name = "stale-edit"
+	if err := s.UpdateMetadata(expected, edit); err == nil {
+		t.Fatal("stale connection accepted")
+	}
+	got, key, err := s.GetWithAPIKey(host.ID)
+	if err != nil || got.BaseURL != "http://192.0.2.2:33802" || key != "rotated-key" || got.Name != "renamed" {
+		t.Fatal("stale metadata edit changed the connection or name")
+	}
+	reloaded := NewHostStore(s.filePath, "controller-test-key-at-least-32-characters")
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = reloaded.Get(host.ID)
+	if got.AgentLastSeenAt == nil || !got.AgentLastSeenAt.Equal(latest) {
+		t.Fatal("latest heartbeat was not persisted")
+	}
+}

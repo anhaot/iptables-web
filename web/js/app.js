@@ -3,7 +3,7 @@
 const GLOBAL_PAGES = ['fleet', 'assistant', 'hosts', 'users'];
 const HOST_PAGES = ['dashboard', 'rules', 'chains', 'docker', 'system'];
 const APP_PAGES = GLOBAL_PAGES.concat(HOST_PAGES);
-const AGENT_OFFLINE_AFTER_MS = 45000;
+const DEFAULT_MONITORING_POLICY = { probe_interval_seconds: 60, offline_after_seconds: 45 };
 
 const AppState = {
   page: 'fleet',
@@ -24,6 +24,8 @@ const AppState = {
   hosts: [],
   hostStatuses: {},
   hostMonitor: null,
+ monitoringPolicy: { ...DEFAULT_MONITORING_POLICY },
+ hostMonitorRunning: false,
   // This is an opened host detail, not a global host switcher. It is kept in
   // session storage only so refreshing a detail page does not lose context.
   selectedHostID: typeof sessionStorage !== 'undefined' ? (sessionStorage.getItem('selected_host_id') || '') : '',
@@ -177,7 +179,9 @@ const AppState = {
 
   async loadHosts() {
     try {
-      this.hosts = await api.listHosts();
+      const [hosts, policy] = await Promise.all([api.listHosts(), api.getMonitoringPolicy()]);
+ this.hosts = hosts;
+ this.monitoringPolicy = policy;
     } catch (_) {
       if (!Array.isArray(this.hosts)) this.hosts = [];
     }
@@ -272,7 +276,7 @@ const AppState = {
     const view = hostConnectivityPresentation(host, status);
     const statusText = view.text;
     root.className = `host-context-bar host-detail-header is-remote${view.isProblem ? ' has-error' : ''}`;
-    root.innerHTML = `<div class="host-context-main"><button class="btn btn-sm btn-secondary" type="button" onclick="AppState.closeHost('fleet')">← 返回主机列表</button><div class="host-context-identity"><span class="host-context-kicker">主机配置</span><strong>${escapeHtml(host.name)}</strong><span class="host-context-address">${escapeHtml(host.base_url)}</span><span class="host-context-status">${escapeHtml(statusText)}</span></div></div><nav class="host-detail-tabs" aria-label="主机配置导航">${hostDetailTabs(this.page)}</nav>`;
+    root.innerHTML = `<div class="host-context-main"><button class="btn btn-sm btn-secondary" type="button" onclick="AppState.closeHost('fleet')">← 返回主机列表</button><div class="host-context-identity"><span class="host-context-kicker">主机配置</span><strong>${escapeHtml(host.name)}</strong><span class="host-context-address">${escapeHtml(host.base_url)}</span><span class="host-context-status">${escapeHtml(statusText)}</span></div>${this.canManageFleet() ? `<button class="btn btn-sm btn-secondary host-context-settings" onclick="HostManagement.openSettings('${host.id}')">检测设置</button>` : ''}</div><nav class="host-detail-tabs" aria-label="主机配置导航">${hostDetailTabs(this.page)}</nav>`;
   },
 
   canManageFleet() {
@@ -315,8 +319,11 @@ const AppState = {
   startHostMonitor() {
     if (this.hostMonitor || typeof window === 'undefined') return;
     this.hostMonitor = window.setInterval(async () => {
+      if (this.hostMonitorRunning) return;
+      this.hostMonitorRunning = true;
       try {
-        const hosts = await api.listHosts();
+        const [hosts, policy] = await Promise.all([api.listHosts(), api.getMonitoringPolicy()]);
+        this.monitoringPolicy = policy;
         this.hosts = hosts;
         this.renderFleetIndicator();
         this.renderHostContext();
@@ -329,7 +336,7 @@ const AppState = {
           hosts.forEach(host => HostManagement.renderStatus(host.id));
           void HostManagement.probeAll(true, false);
         }
-      } catch (_) { /* keep the last known state */ }
+      } catch (_) { /* keep the last known state */ } finally { this.hostMonitorRunning = false; }
     }, 15000);
   },
 
@@ -343,11 +350,19 @@ const AppState = {
   }
 };
 
+function effectiveHostMonitoring(host, policy) {
+ const defaults = policy || AppState.monitoringPolicy || DEFAULT_MONITORING_POLICY;
+ return {
+  probe_interval_seconds: Number(host && host.probe_interval_seconds) || Number(defaults.probe_interval_seconds) || 60,
+  offline_after_seconds: Number(host && host.offline_after_seconds) || Number(defaults.offline_after_seconds) || 45
+ };
+}
+
 function agentHeartbeatState(host, now) {
   const timestamp = host && host.agent_last_seen_at ? new Date(host.agent_last_seen_at).getTime() : NaN;
   if (!Number.isFinite(timestamp)) return { state: 'unknown', age: null };
   const age = Math.max(0, (typeof now === 'number' ? now : Date.now()) - timestamp);
-  return { state: age > AGENT_OFFLINE_AFTER_MS ? 'offline' : 'reporting', age };
+  return { state: age > effectiveHostMonitoring(host).offline_after_seconds * 1000 ? 'offline' : 'reporting', age };
 }
 
 function formatAgentHeartbeat(timestamp, now) {
@@ -407,5 +422,5 @@ if (typeof document !== 'undefined') {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { normalizePage, pageFromHash, hostDetailTabs, agentHeartbeatState, formatAgentHeartbeat, hostConnectivityPresentation };
+  module.exports = { effectiveHostMonitoring, normalizePage, pageFromHash, hostDetailTabs, agentHeartbeatState, formatAgentHeartbeat, hostConnectivityPresentation };
 }

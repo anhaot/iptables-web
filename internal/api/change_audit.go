@@ -154,7 +154,7 @@ func mutationChangesLocalSnapshot(r *http.Request) bool {
 		strings.HasPrefix(path, "/api/v1/users") ||
 		path == "/api/v1/security-policy" ||
 		path == "/api/v1/auth/password" ||
-		path == "/api/v1/docker/whitelist" ||
+		(path == "/api/v1/docker/whitelist" || path == "/api/v1/docker/whitelist/batch") ||
 		path == "/api/v1/system/restore" ||
 		path == "/api/v1/system/managed-rules" ||
 		path == "/api/v1/system/rollback"
@@ -173,7 +173,7 @@ func isMutationRequest(r *http.Request) bool {
 		strings.HasPrefix(path, "/api/v1/users") ||
 		path == "/api/v1/security-policy" ||
 		path == "/api/v1/auth/password" ||
-		path == "/api/v1/docker/whitelist" ||
+		(path == "/api/v1/docker/whitelist" || path == "/api/v1/docker/whitelist/batch") ||
 		path == "/api/v1/system/restore" ||
 		path == "/api/v1/system/managed-rules" ||
 		path == "/api/v1/system/rollback"
@@ -181,7 +181,7 @@ func isMutationRequest(r *http.Request) bool {
 
 func isRollbackEligible(path string) bool {
 	return strings.HasPrefix(path, "/api/v1/rules") ||
-		path == "/api/v1/docker/whitelist" ||
+		(path == "/api/v1/docker/whitelist" || path == "/api/v1/docker/whitelist/batch") ||
 		path == "/api/v1/system/restore" ||
 		path == "/api/v1/system/managed-rules" ||
 		path == "/api/v1/system/rollback"
@@ -226,6 +226,10 @@ func auditAction(r *http.Request) string {
 		return "manage_access_key"
 	case path == "/api/v1/rules" && r.Method == http.MethodPost:
 		return "create_rule"
+	case path == "/api/v1/rules/batch-delete":
+		return "batch_delete_rules"
+	case path == "/api/v1/docker/whitelist/batch":
+		return "create_docker_whitelists"
 	case path == "/api/v1/rules/reorder":
 		return "reorder_rules"
 	case strings.HasSuffix(path, "/toggle"):

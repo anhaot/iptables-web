@@ -95,11 +95,11 @@ func detectForcedBackend(name string) (FirewallBackend, error) {
 	case "nft", "nftables":
 		return nil, fmt.Errorf("FIREWALL_BACKEND=%s is disabled: native nftables rule writes are unsafe; use iptables or the iptables-nft compatibility layer", name)
 	case "iptables", "iptables-legacy", "iptables-nft":
-		backend := newIptablesBackend()
+		backend := newIptablesBackendFor(name)
 		if err := backend.probe(); err != nil {
-			return nil, fmt.Errorf("FIREWALL_BACKEND=%s requested but iptables is unavailable: %w", name, err)
+			return nil, fmt.Errorf("FIREWALL_BACKEND=%s is unavailable: %w", name, err)
 		}
-		appLog.Infof("[firewall] forced backend: iptables")
+		appLog.Infof("[firewall] forced backend: %s", backend.Name())
 		return backend, nil
 	case "dev":
 		appLog.Infof("[firewall] forced backend: dev")

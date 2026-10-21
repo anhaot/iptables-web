@@ -139,6 +139,12 @@ func main() {
 	}
 	appLog.Infof("Loaded API access keys from %s", cfg.APIKeysFile)
 
+	// Validate all controller configuration before touching the firewall.
+	monitoringStore := store.NewMonitoringStore(filepath.Join(filepath.Dir(cfg.RulesFile), "monitoring-policy.json"))
+	if err := monitoringStore.Load(); err != nil {
+		log.Fatalf("Failed to load monitoring policy: %v", err)
+	}
+
 	// Session and captcha cleanup ticker
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
@@ -170,9 +176,6 @@ func main() {
 	// level because every known rule is deleted first, then enabled rules are
 	// re-added with compact effective positions.
 	allRules, _ := ruleStore.All()
-	if err := exe.MigrateLegacyRules(allRules); err != nil {
-		log.Fatalf("Failed to migrate legacy unowned firewall rules: %v", err)
-	}
 	enabled := 0
 	for _, rule := range allRules {
 		if rule.Enabled {
@@ -194,6 +197,7 @@ func main() {
 	authHandler := api.NewAuthHandler(userStore)
 	userHandler := api.NewUserHandler(userStore, hostStore)
 	hostHandler := api.NewHostHandler(hostStore, userStore)
+	hostHandler.SetMonitoringStore(monitoringStore)
 	enrollmentHandler := api.NewEnrollmentHandler(hostStore)
 	accessKeyHandler := api.NewAccessKeyHandler(apiKeyStore)
 	router := api.NewRouter(apiHandler, authHandler, userHandler, hostHandler, enrollmentHandler, accessKeyHandler, userStore, apiKeyStore, assets.WebFS)
