@@ -213,3 +213,10 @@ diff -qr web assets/web
 - 当前验证始终使用隔离数据与 no-op 后端，不操作现有 systemd 服务或真实远程规则；真实内核与发行版部署仍需专用测试机验收。
 
 - 本轮复核包含 173 个 Go 测试入口的普通/竞态测试、vet、前端/安装路径、包内双进程联调、Gitleaks 当前内容/历史和 govulncheck；具体边界见公开复核文档。README 截图更新为隔离演示环境，Docker 映射采用浏览器演示响应，不公开真实本机容器信息。
+
+## 正式发布补充（2026-10-21）
+
+- `e283ebc` 更新了源码并通过 CI，但没有版本 Tag，因此不会更新旧的 GitHub Release 附件。本轮以新版本 `v0.3.0` 发布新增监控、Docker 批量操作和安全修复。
+- 发布包可直接使用 `VERSION=0.3.0 bash scripts/build-package.sh` 在本地构建，不依赖 CI/CD；`main` 推送只运行检查，新 `vX.Y.Z` Tag 才触发 `.github/workflows/release.yml` 构建并创建 Release。
+- 发布前验证本地双二进制与压缩包；正式附件需在 Release 工作流成功后核对版本、SHA-256 和内容。不能把源码推送成功、CI 成功或 GitHub 自动生成的 Source code 压缩包当作二进制已发布。
+- 旧 Tag 和旧 Release 保留；中心与 Agent 需分别升级，中心升级不会替远程 Agent 更新二进制。仍不操作现有 systemd 服务或真实远程规则。

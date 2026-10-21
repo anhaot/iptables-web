@@ -162,6 +162,8 @@ Linux packet filter
 
 从 [GitHub Releases](https://github.com/anhaot/iptables-web/releases) 下载压缩包及对应的 SHA-256 文件：
 
+选择 `iptables-web-<版本>-linux-amd64.tar.gz` 和同名 `.sha256` 附件，包内同时包含中心端与 Agent。GitHub 自动提供的 `Source code` 是源码压缩包，不含预编译二进制。源码更新不会自动替换已发布附件。
+
 ```bash
 sha256sum -c iptables-web-<版本>-linux-amd64.tar.gz.sha256
 tar -xzf iptables-web-<版本>-linux-amd64.tar.gz
@@ -286,6 +288,8 @@ python3 scripts/check-source.py
 ```
 
 本地开发、前端同步、发布包和提交要求见[贡献指南](CONTRIBUTING.md)。
+
+发布包也可在本地构建，无需 CI/CD：`VERSION=0.3.0 bash scripts/build-package.sh`。构建结果位于 `dist/`；GitHub 自动发布由新的版本 Tag 触发。
 
 ## 文档
 

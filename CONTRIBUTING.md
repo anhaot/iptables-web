@@ -61,13 +61,22 @@ diff -qr web assets/web
 ## 构建发布包
 
 ```bash
-VERSION=0.1.0 bash scripts/build-package.sh
-bash scripts/verify-package.sh dist/iptables-web-0.1.0-linux-amd64.tar.gz
+VERSION=0.3.0 bash scripts/build-package.sh
+bash scripts/verify-package.sh dist/iptables-web-0.3.0-linux-amd64.tar.gz
 ```
 
 构建需要 Python 3 检查文档链接与公开文件边界；目标机安装不需要 Python 或 Go。构建脚本会同步前端、运行测试、生成 Linux amd64 二进制、安装脚本、文档、版本清单和 SHA-256。离线验证不会启动服务或访问防火墙。
 
-正式版本使用 `v主版本.次版本.修订版本` Tag。推送版本 Tag 后，GitHub Actions 自动构建并创建 Release。`dist/` 只用于本地构建，不提交到 Git。
+发布包可以完全在本地构建，不依赖 CI/CD。上述命令将中心端、Agent、安装脚本与文档打包到 `dist/`，并生成对应 SHA-256 校验文件；`dist/` 不提交到源码分支。
+
+推送 `main` 只运行 CI 检查，不会更新 GitHub Releases。正式版本使用 `v主版本.次版本.修订版本` Tag；维护者在目标提交通过检查并完成本地验包后，推送新 Tag，现有 Release 工作流会重新构建并发布压缩包与校验和。例如：
+
+```bash
+git tag -a v0.3.0 -m "iptables-web v0.3.0"
+git push origin v0.3.0
+```
+
+示例版本已发布后应选择新的版本号，不移动或覆盖已有发布 Tag。发布完成后，在 GitHub Releases 确认版本、附件和校验和；GitHub 自动生成的 Source code 压缩包只是源码，不是可直接安装的二进制发布包。
 
 ## 提交说明
 
